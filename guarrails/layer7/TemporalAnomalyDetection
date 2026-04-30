@@ -1,0 +1,734 @@
+# File: guardrails/layer7/temporal_anomaly_detection.py
+
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timedelta, time as datetime_time
+from collections import defaultdict, deque
+import statistics
+import math
+import logging
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class TemporalAnomaly:
+    """Detected temporal anomaly"""
+    anomaly_id: str
+    anomaly_type: str
+    severity: str  # low, medium, high, critical
+    confidence: float  # 0.0 to 1.0
+    detected_at: datetime
+    description: str
+    indicators: Dict
+    user_id: Optional[str] = None
+
+@dataclass
+class ActivityPattern:
+    """User's historical activity pattern"""
+    user_id: str
+    hour_distribution: Dict[int, int]  # {hour: count}
+    day_distribution: Dict[int, int]   # {day_of_week: count}
+    typical_intervals: List[float]      # Seconds between requests
+    burst_baseline: float              # Normal request rate
+    last_updated: datetime
+    total_samples: int
+
+class TemporalAnomalyDetector:
+    """
+    Detect temporal anomalies in user and system behavior.
+    
+    Features:
+    - Time-of-day anomaly detection
+    - Day-of-week pattern analysis
+    - Request interval regularity detection (bot detection)
+    - Burst traffic detection
+    - Dormancy-then-spike detection
+    - Geographic time consistency checks
+    - Seasonal pattern analysis
+    """
+    
+    def __init__(self):
+        # User activity patterns (learned over time)
+        self.user_patterns = {}  # {user_id: ActivityPattern}
+        
+        # Recent activity tracking
+        self.recent_activity = defaultdict(lambda: deque(maxlen=1000))  # {user_id: [(timestamp, ...)]}
+        
+        # System-wide patterns
+        self.system_patterns = {
+            'hourly_baseline': defaultdict(int),
+            'daily_baseline': defaultdict(int),
+            'last_baseline_update': datetime.utcnow()
+        }
+        
+        # Detection thresholds
+        self.thresholds = {
+            'interval_regularity_threshold': 0.95,  # 95% regular = bot
+            'burst_multiplier': 5.0,                # 5x normal = burst
+            'off_hours_threshold': 0.1,             # <10% of normal activity
+            'dormancy_days': 30,                    # 30 days = dormant
+            'geographic_time_tolerance_hours': 2    # 2 hour tolerance
+        }
+        
+        # Anomaly history
+        self.detected_anomalies = []
+        
+        # Known sleep patterns (can be learned or user-provided)
+        self.sleep_patterns = {}  # {user_id: {'start': time, 'end': time}}
+    
+    def record_activity(
+        self,
+        user_id: str,
+        timestamp: datetime = None,
+        metadata: Dict = None
+    ):
+        """
+        Record user activity for pattern learning.
+        
+        Args:
+            user_id: User identifier
+            timestamp: Activity timestamp (defaults to now)
+            metadata: Additional metadata (IP, location, etc.)
+        """
+        
+        timestamp = timestamp or datetime.utcnow()
+        
+        # Store in recent activity
+        self.recent_activity[user_id].append({
+            'timestamp': timestamp,
+            'metadata': metadata or {}
+        })
+        
+        # Update or create user pattern
+        if user_id not in self.user_patterns:
+            self.user_patterns[user_id] = ActivityPattern(
+                user_id=user_id,
+                hour_distribution={},
+                day_distribution={},
+                typical_intervals=[],
+                burst_baseline=0.0,
+                last_updated=timestamp,
+                total_samples=0
+            )
+        
+        pattern = self.user_patterns[user_id]
+        
+        # Update hour distribution
+        hour = timestamp.hour
+        pattern.hour_distribution[hour] = pattern.hour_distribution.get(hour, 0) + 1
+        
+        # Update day distribution
+        day = timestamp.weekday()  # 0=Monday, 6=Sunday
+        pattern.day_distribution[day] = pattern.day_distribution.get(day, 0) + 1
+        
+        # Update intervals
+        activities = list(self.recent_activity[user_id])
+        if len(activities) >= 2:
+            last_two = activities[-2:]
+            interval = (last_two[1]['timestamp'] - last_two[0]['timestamp']).total_seconds()
+            pattern.typical_intervals.append(interval)
+            
+            # Keep only recent intervals (last 100)
+            if len(pattern.typical_intervals) > 100:
+                pattern.typical_intervals = pattern.typical_intervals[-100:]
+        
+        pattern.total_samples += 1
+        pattern.last_updated = timestamp
+        
+        # Update system baselines
+        self._update_system_baseline(timestamp)
+    
+    def analyze_activity(
+        self,
+        user_id: str,
+        current_timestamp: datetime = None,
+        context: Dict = None
+    ) -> List[TemporalAnomaly]:
+        """
+        Analyze current activity for temporal anomalies.
+        
+        Args:
+            user_id: User identifier
+            current_timestamp: Current activity timestamp
+            context: Additional context (location, IP, etc.)
+            
+        Returns:
+            List of detected anomalies
+        """
+        
+        current_timestamp = current_timestamp or datetime.utcnow()
+        anomalies = []
+        
+        # Detection 1: Time-of-day anomaly
+        tod_anomaly = self._detect_time_of_day_anomaly(user_id, current_timestamp)
+        if tod_anomaly:
+            anomalies.append(tod_anomaly)
+        
+        # Detection 2: Day-of-week anomaly
+        dow_anomaly = self._detect_day_of_week_anomaly(user_id, current_timestamp)
+        if dow_anomaly:
+            anomalies.append(dow_anomaly)
+        
+        # Detection 3: Request interval regularity (bot detection)
+        bot_anomaly = self._detect_bot_pattern(user_id)
+        if bot_anomaly:
+            anomalies.append(bot_anomaly)
+        
+        # Detection 4: Burst traffic
+        burst_anomaly = self._detect_burst_traffic(user_id, current_timestamp)
+        if burst_anomaly:
+            anomalies.append(burst_anomaly)
+        
+        # Detection 5: Dormancy-then-spike
+        dormancy_anomaly = self._detect_dormancy_spike(user_id, current_timestamp)
+        if dormancy_anomaly:
+            anomalies.append(dormancy_anomaly)
+        
+        # Detection 6: Sleep hours violation
+        sleep_anomaly = self._detect_sleep_hours_violation(user_id, current_timestamp)
+        if sleep_anomaly:
+            anomalies.append(sleep_anomaly)
+        
+        # Detection 7: Geographic time inconsistency
+        if context and 'timezone' in context:
+            geo_anomaly = self._detect_geographic_time_inconsistency(
+                user_id,
+                current_timestamp,
+                context['timezone']
+            )
+            if geo_anomaly:
+                anomalies.append(geo_anomaly)
+        
+        # Detection 8: Holiday/weekend anomaly (system-level)
+        holiday_anomaly = self._detect_holiday_anomaly(current_timestamp)
+        if holiday_anomaly:
+            anomalies.append(holiday_anomaly)
+        
+        # Store detected anomalies
+        for anomaly in anomalies:
+            self.detected_anomalies.append(anomaly)
+            
+            # Keep only recent anomalies (last 10,000)
+            if len(self.detected_anomalies) > 10000:
+                self.detected_anomalies = self.detected_anomalies[-10000:]
+        
+        return anomalies
+    
+    def set_sleep_pattern(
+        self,
+        user_id: str,
+        sleep_start: datetime_time,
+        sleep_end: datetime_time
+    ):
+        """
+        Set user's typical sleep pattern.
+        
+        Args:
+            user_id: User identifier
+            sleep_start: Typical sleep start time (e.g., 23:00)
+            sleep_end: Typical wake time (e.g., 07:00)
+        """
+        
+        self.sleep_patterns[user_id] = {
+            'start': sleep_start,
+            'end': sleep_end
+        }
+        
+        logger.info(f"Sleep pattern set for {user_id}: {sleep_start} - {sleep_end}")
+    
+    def _detect_time_of_day_anomaly(
+        self,
+        user_id: str,
+        timestamp: datetime
+    ) -> Optional[TemporalAnomaly]:
+        """Detect if activity occurs at unusual time of day"""
+        
+        if user_id not in self.user_patterns:
+            return None  # Not enough data
+        
+        pattern = self.user_patterns[user_id]
+        
+        if pattern.total_samples < 50:
+            return None  # Need more samples
+        
+        current_hour = timestamp.hour
+        
+        # Calculate expected activity for this hour
+        total_activity = sum(pattern.hour_distribution.values())
+        hour_activity = pattern.hour_distribution.get(current_hour, 0)
+        hour_ratio = hour_activity / total_activity if total_activity > 0 else 0
+        
+        # Average activity across all hours
+        avg_ratio = 1.0 / 24
+        
+        # Flag if activity is significantly below normal for this hour
+        if hour_ratio < avg_ratio * self.thresholds['off_hours_threshold']:
+            # This hour has <10% of expected activity
+            
+            # Calculate severity
+            if hour_ratio == 0:
+                severity = 'high'
+                confidence = 0.9
+            elif hour_ratio < avg_ratio * 0.05:
+                severity = 'medium'
+                confidence = 0.7
+            else:
+                severity = 'low'
+                confidence = 0.5
+            
+            return TemporalAnomaly(
+                anomaly_id=f"tod_{user_id}_{timestamp.timestamp()}",
+                anomaly_type='time_of_day_anomaly',
+                severity=severity,
+                confidence=confidence,
+                detected_at=datetime.utcnow(),
+                description=f"Activity at hour {current_hour} is unusual (only {hour_ratio:.1%} of typical activity)",
+                indicators={
+                    'hour': current_hour,
+                    'typical_ratio': avg_ratio,
+                    'actual_ratio': hour_ratio,
+                    'historical_samples': pattern.total_samples
+                },
+                user_id=user_id
+            )
+        
+        return None
+    
+    def _detect_day_of_week_anomaly(
+        self,
+        user_id: str,
+        timestamp: datetime
+    ) -> Optional[TemporalAnomaly]:
+        """Detect if activity occurs on unusual day of week"""
+        
+        if user_id not in self.user_patterns:
+            return None
+        
+        pattern = self.user_patterns[user_id]
+        
+        if pattern.total_samples < 50:
+            return None
+        
+        current_day = timestamp.weekday()
+        
+        # Calculate expected activity for this day
+        total_activity = sum(pattern.day_distribution.values())
+        day_activity = pattern.day_distribution.get(current_day, 0)
+        day_ratio = day_activity / total_activity if total_activity > 0 else 0
+        
+        # Average activity across all days
+        avg_ratio = 1.0 / 7
+        
+        # Flag if activity is significantly below normal for this day
+        if day_ratio < avg_ratio * 0.3:  # <30% of expected
+            
+            day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            
+            return TemporalAnomaly(
+                anomaly_id=f"dow_{user_id}_{timestamp.timestamp()}",
+                anomaly_type='day_of_week_anomaly',
+                severity='medium',
+                confidence=0.6,
+                detected_at=datetime.utcnow(),
+                description=f"Activity on {day_names[current_day]} is unusual (only {day_ratio:.1%} of typical activity)",
+                indicators={
+                    'day_of_week': current_day,
+                    'day_name': day_names[current_day],
+                    'typical_ratio': avg_ratio,
+                    'actual_ratio': day_ratio
+                },
+                user_id=user_id
+            )
+        
+        return None
+    
+    def _detect_bot_pattern(
+        self,
+        user_id: str
+    ) -> Optional[TemporalAnomaly]:
+        """Detect bot-like perfectly regular timing"""
+        
+        if user_id not in self.user_patterns:
+            return None
+        
+        pattern = self.user_patterns[user_id]
+        
+        if len(pattern.typical_intervals) < 10:
+            return None  # Need more data
+        
+        # Calculate coefficient of variation (std dev / mean)
+        intervals = pattern.typical_intervals[-50:]  # Last 50 intervals
+        
+        if len(intervals) < 10:
+            return None
+        
+        mean_interval = statistics.mean(intervals)
+        
+        if mean_interval == 0:
+            return None
+        
+        try:
+            std_interval = statistics.stdev(intervals)
+            coefficient_of_variation = std_interval / mean_interval
+        except:
+            return None
+        
+        # Very low CV indicates regular timing (bot-like)
+        # Humans have irregular timing, bots are precise
+        regularity_score = 1.0 - min(coefficient_of_variation, 1.0)
+        
+        if regularity_score > self.thresholds['interval_regularity_threshold']:
+            
+            return TemporalAnomaly(
+                anomaly_id=f"bot_{user_id}_{datetime.utcnow().timestamp()}",
+                anomaly_type='bot_pattern_detected',
+                severity='high',
+                confidence=regularity_score,
+                detected_at=datetime.utcnow(),
+                description=f"Perfectly regular request timing detected (regularity: {regularity_score:.1%})",
+                indicators={
+                    'mean_interval_seconds': mean_interval,
+                    'std_dev_seconds': std_interval,
+                    'coefficient_of_variation': coefficient_of_variation,
+                    'regularity_score': regularity_score,
+                    'sample_intervals': intervals[-10:]
+                },
+                user_id=user_id
+            )
+        
+        return None
+    
+    def _detect_burst_traffic(
+        self,
+        user_id: str,
+        current_timestamp: datetime
+    ) -> Optional[TemporalAnomaly]:
+        """Detect sudden burst of activity"""
+        
+        if user_id not in self.recent_activity:
+            return None
+        
+        activities = list(self.recent_activity[user_id])
+        
+        if len(activities) < 10:
+            return None
+        
+        # Count requests in last 1 minute
+        one_min_ago = current_timestamp - timedelta(minutes=1)
+        recent_count = sum(
+            1 for activity in activities
+            if activity['timestamp'] > one_min_ago
+        )
+        
+        # Count requests in last 1 hour (for baseline)
+        one_hour_ago = current_timestamp - timedelta(hours=1)
+        hour_count = sum(
+            1 for activity in activities
+            if activity['timestamp'] > one_hour_ago
+        )
+        
+        # Calculate normal rate (requests per minute)
+        normal_rate = hour_count / 60.0 if hour_count > 0 else 0.1
+        
+        # Detect burst
+        if recent_count > normal_rate * self.thresholds['burst_multiplier']:
+            
+            severity = 'critical' if recent_count > normal_rate * 10 else 'high'
+            
+            return TemporalAnomaly(
+                anomaly_id=f"burst_{user_id}_{current_timestamp.timestamp()}",
+                anomaly_type='burst_traffic',
+                severity=severity,
+                confidence=0.85,
+                detected_at=datetime.utcnow(),
+                description=f"Burst detected: {recent_count} requests in 1 min (normal: {normal_rate:.1f}/min)",
+                indicators={
+                    'recent_count': recent_count,
+                    'normal_rate_per_min': normal_rate,
+                    'burst_multiplier': recent_count / normal_rate if normal_rate > 0 else 0
+                },
+                user_id=user_id
+            )
+        
+        return None
+    
+    def _detect_dormancy_spike(
+        self,
+        user_id: str,
+        current_timestamp: datetime
+    ) -> Optional[TemporalAnomaly]:
+        """Detect activity spike after long dormancy"""
+        
+        if user_id not in self.recent_activity:
+            return None
+        
+        activities = list(self.recent_activity[user_id])
+        
+        if len(activities) < 5:
+            return None
+        
+        # Find time since last activity before current spike
+        if len(activities) >= 2:
+            time_gaps = []
+            for i in range(len(activities) - 1):
+                gap = (activities[i+1]['timestamp'] - activities[i]['timestamp']).total_seconds() / 86400  # days
+                time_gaps.append(gap)
+            
+            # Check if there was a long gap before recent activity
+            if time_gaps:
+                max_gap = max(time_gaps[-10:]) if len(time_gaps) >= 10 else max(time_gaps)
+                
+                if max_gap > self.thresholds['dormancy_days']:
+                    
+                    # Count recent activity (last hour)
+                    one_hour_ago = current_timestamp - timedelta(hours=1)
+                    recent_count = sum(
+                        1 for activity in activities
+                        if activity['timestamp'] > one_hour_ago
+                    )
+                    
+                    if recent_count > 10:  # Significant activity
+                        
+                        return TemporalAnomaly(
+                            anomaly_id=f"dormancy_{user_id}_{current_timestamp.timestamp()}",
+                            anomaly_type='dormancy_spike',
+                            severity='high',
+                            confidence=0.8,
+                            detected_at=datetime.utcnow(),
+                            description=f"Activity spike after {max_gap:.0f} days of dormancy",
+                            indicators={
+                                'dormancy_days': max_gap,
+                                'recent_activity_count': recent_count,
+                                'threshold_days': self.thresholds['dormancy_days']
+                            },
+                            user_id=user_id
+                        )
+        
+        return None
+    
+    def _detect_sleep_hours_violation(
+        self,
+        user_id: str,
+        timestamp: datetime
+    ) -> Optional[TemporalAnomaly]:
+        """Detect activity during user's typical sleep hours"""
+        
+        if user_id not in self.sleep_patterns:
+            return None  # No sleep pattern defined
+        
+        sleep_pattern = self.sleep_patterns[user_id]
+        current_time = timestamp.time()
+        
+        sleep_start = sleep_pattern['start']
+        sleep_end = sleep_pattern['end']
+        
+        # Check if current time is within sleep hours
+        # Handle case where sleep spans midnight
+        if sleep_start > sleep_end:  # e.g., 23:00 to 07:00
+            is_sleep_time = current_time >= sleep_start or current_time <= sleep_end
+        else:  # e.g., 22:00 to 06:00 (same day)
+            is_sleep_time = sleep_start <= current_time <= sleep_end
+        
+        if is_sleep_time:
+            
+            return TemporalAnomaly(
+                anomaly_id=f"sleep_{user_id}_{timestamp.timestamp()}",
+                anomaly_type='sleep_hours_violation',
+                severity='medium',
+                confidence=0.7,
+                detected_at=datetime.utcnow(),
+                description=f"Activity detected during typical sleep hours",
+                indicators={
+                    'current_time': current_time.isoformat(),
+                    'sleep_start': sleep_start.isoformat(),
+                    'sleep_end': sleep_end.isoformat()
+                },
+                user_id=user_id
+            )
+        
+        return None
+    
+    def _detect_geographic_time_inconsistency(
+        self,
+        user_id: str,
+        timestamp: datetime,
+        timezone: str
+    ) -> Optional[TemporalAnomaly]:
+        """Detect geographic-temporal inconsistencies"""
+        
+        # This is simplified - in production, use timezone database
+        # to convert timestamp to local time and check consistency
+        
+        # For example: if user authenticated from SF IP at 3 AM SF time,
+        # but their historical pattern shows they sleep 11 PM - 7 AM,
+        # this is suspicious
+        
+        # Placeholder implementation
+        # In production: convert to local timezone, check against sleep pattern
+        
+        return None
+    
+    def _detect_holiday_anomaly(
+        self,
+        timestamp: datetime
+    ) -> Optional[TemporalAnomaly]:
+        """Detect unusual system-wide activity on holidays"""
+        
+        # Define major holidays (simplified - use holiday library in production)
+        holidays = [
+            (12, 25),  # Christmas
+            (1, 1),    # New Year
+            (7, 4),    # July 4th (US)
+            (11, 28),  # Thanksgiving (varies)
+        ]
+        
+        current_date = (timestamp.month, timestamp.day)
+        
+        if current_date in holidays:
+            # Check if system-wide activity is unusually high
+            # This is a simplified check - in production, compare to historical
+            
+            return TemporalAnomaly(
+                anomaly_id=f"holiday_{timestamp.timestamp()}",
+                anomaly_type='holiday_anomaly',
+                severity='medium',
+                confidence=0.6,
+                detected_at=datetime.utcnow(),
+                description=f"Unusual activity on holiday: {timestamp.date()}",
+                indicators={
+                    'date': timestamp.date().isoformat(),
+                    'is_holiday': True
+                },
+                user_id=None  # System-wide
+            )
+        
+        return None
+    
+    def _update_system_baseline(self, timestamp: datetime):
+        """Update system-wide activity baselines"""
+        
+        hour = timestamp.hour
+        day = timestamp.weekday()
+        
+        self.system_patterns['hourly_baseline'][hour] += 1
+        self.system_patterns['daily_baseline'][day] += 1
+        self.system_patterns['last_baseline_update'] = timestamp
+    
+    def get_user_activity_summary(self, user_id: str) -> Optional[Dict]:
+        """Get summary of user's activity pattern"""
+        
+        if user_id not in self.user_patterns:
+            return None
+        
+        pattern = self.user_patterns[user_id]
+        
+        # Find most active hour
+        most_active_hour = max(
+            pattern.hour_distribution,
+            key=pattern.hour_distribution.get
+        ) if pattern.hour_distribution else None
+        
+        # Find most active day
+        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        most_active_day = max(
+            pattern.day_distribution,
+            key=pattern.day_distribution.get
+        ) if pattern.day_distribution else None
+        
+        # Calculate average interval
+        avg_interval = statistics.mean(pattern.typical_intervals) if pattern.typical_intervals else 0
+        
+        return {
+            'user_id': user_id,
+            'total_samples': pattern.total_samples,
+            'most_active_hour': most_active_hour,
+            'most_active_day': day_names[most_active_day] if most_active_day is not None else None,
+            'average_interval_seconds': avg_interval,
+            'hour_distribution': dict(pattern.hour_distribution),
+            'day_distribution': {
+                day_names[k]: v for k, v in pattern.day_distribution.items()
+            }
+        }
+
+
+# Example usage
+if __name__ == "__main__":
+    detector = TemporalAnomalyDetector()
+    
+    # Simulate user activity pattern
+    user_id = 'user_123'
+    
+    # Record normal activity (9 AM - 5 PM on weekdays)
+    import random
+    base_time = datetime(2024, 1, 15, 9, 0)  # Monday 9 AM
+    
+    for day in range(5):  # 5 weekdays
+        for hour in range(8):  # 8 hours (9 AM - 5 PM)
+            # Random activities throughout the day
+            for _ in range(random.randint(3, 8)):
+                activity_time = base_time + timedelta(days=day, hours=hour, minutes=random.randint(0, 59))
+                detector.record_activity(user_id, activity_time)
+    
+    print("Activity pattern learned")
+    
+    # Get activity summary
+    summary = detector.get_user_activity_summary(user_id)
+    print(f"\nUser activity summary:")
+    print(f"  Total samples: {summary['total_samples']}")
+    print(f"  Most active hour: {summary['most_active_hour']}:00")
+    print(f"  Most active day: {summary['most_active_day']}")
+    print(f"  Hour distribution: {summary['hour_distribution']}")
+    
+    # Set sleep pattern
+    detector.set_sleep_pattern(
+        user_id,
+        datetime_time(23, 0),  # 11 PM
+        datetime_time(7, 0)    # 7 AM
+    )
+    
+    # Test 1: Activity at 3 AM (anomaly)
+    anomalous_time = datetime(2024, 1, 20, 3, 30)  # Saturday 3:30 AM
+    anomalies = detector.analyze_activity(user_id, anomalous_time)
+    
+    print(f"\nTest 1 - Activity at 3 AM:")
+    print(f"  Anomalies detected: {len(anomalies)}")
+    for anomaly in anomalies:
+        print(f"    - {anomaly.anomaly_type}: {anomaly.description} (severity: {anomaly.severity})")
+    
+    # Test 2: Bot-like regular timing
+    bot_user = 'bot_456'
+    bot_base_time = datetime(2024, 1, 15, 10, 0)
+    
+    # Perfect 5-second intervals
+    for i in range(50):
+        bot_time = bot_base_time + timedelta(seconds=i * 5)
+        detector.record_activity(bot_user, bot_time)
+    
+    bot_anomalies = detector.analyze_activity(bot_user)
+    
+    print(f"\nTest 2 - Bot detection:")
+    print(f"  Anomalies detected: {len(bot_anomalies)}")
+    for anomaly in bot_anomalies:
+        print(f"    - {anomaly.anomaly_type}: {anomaly.description}")
+        print(f"      Confidence: {anomaly.confidence:.1%}")
+    
+    # Test 3: Burst traffic
+    burst_user = 'burst_789'
+    burst_time = datetime(2024, 1, 15, 14, 0)
+    
+    # Normal activity
+    for i in range(10):
+        detector.record_activity(burst_user, burst_time + timedelta(minutes=i * 5))
+    
+    # Sudden burst
+    for i in range(25):
+        detector.record_activity(burst_user, burst_time + timedelta(hours=1, seconds=i * 2))
+    
+    burst_anomalies = detector.analyze_activity(burst_user, burst_time + timedelta(hours=1, minutes=1))
+    
+    print(f"\nTest 3 - Burst detection:")
+    print(f"  Anomalies detected: {len(burst_anomalies)}")
+    for anomaly in burst_anomalies:
+        print(f"    - {anomaly.anomaly_type}: {anomaly.description}")
+        if 'burst_multiplier' in anomaly.indicators:
+            print(f"      Burst multiplier: {anomaly.indicators['burst_multiplier']:.1f}x")
