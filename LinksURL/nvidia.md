@@ -1,31 +1,32 @@
-🎓 Harvard University LECTURES
+# 1. Generative AI Explained
+https://lnkd.in/gBb3peXi
 
-# 1. Introduction to Generative AI
-A step-by-step guide to how GenAI actually works.
-Link: https://lnkd.in/e9rWNjBE
+# 2. Agentic AI Explained
+https://lnkd.in/guBtU3-k
 
-# 2. Prompt Engineering
-Real tips for improving output quality from any LLM.
-Link: https://lnkd.in/e5nekvS2
+# 3. Getting Started with AI on Jetson Nano
+https://lnkd.in/gnmrhBJm
 
-# 3. Beyond Chatbots: System Prompts, RAG
-Move past surface use cases into scalable applications.
-Link: https://lnkd.in/exsX5tP7 
+# 4. Building A Brain in 10 Minutes
+https://lnkd.in/gCaA-XKp
 
-# 4. Generative AI in Teaching & Learning
-How educators can adapt and lead with AI.
-Playlist: https://lnkd.in/erdwPRvu
+# 5. A Beginner's Guide to Autonomous Robots
+https://lnkd.in/g5sVKrWu
 
-# 5. Teaching with AI in the Classroom
-Frameworks for trainers and educators.
-Link: https://lnkd.in/eWXskwWG
+# 6. Building RAG Agents with LLMs
+https://lnkd.in/gcK2ZJ4a
 
-# 6. The Basics of Generative AI
-No jargon. Just clarity.
-Link: https://lnkd.in/eSCJ62Bi
+# 7. Data Science Workflows with Zero Code Changes
+https://lnkd.in/gF7eVk2V
 
+# 8. AI Infrastructure and Operations Fundamentals
+https://lnkd.in/gKTS6uMS
 
-BONUS 
+# 9. NVIDIA Tools for Generative AI in Digital Health
+https://lnkd.in/gaMUhSVR
+
+# 10. An Introduction to Developing With NVIDIA Omniverse
+https://lnkd.in/gmS-kc3p
 
 🟩 CS50x 2025 – Artificial Intelligence Lecture
 LLMs, neural nets, and real-world use cases
