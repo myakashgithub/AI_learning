@@ -1,0 +1,25 @@
+class SlidingWindowLog:
+    def __init__(self, limit, window_seconds):
+        self.limit = limit
+        self.window = window_seconds
+        self.logs = {}  # {user_id: [timestamps]}
+        
+    def allow_request(self, user_id):
+        now = time.time()
+        
+        if user_id not in self.logs:
+            self.logs[user_id] = [now]
+            return True
+            
+        # Remove old timestamps
+        self.logs[user_id] = [
+            ts for ts in self.logs[user_id]
+            if now - ts < self.window
+        ]
+        
+        # Check limit
+        if len(self.logs[user_id]) < self.limit:
+            self.logs[user_id].append(now)
+            return True
+            
+        return False
