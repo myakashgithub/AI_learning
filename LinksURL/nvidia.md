@@ -1,0 +1,45 @@
+🎓 Harvard University LECTURES
+
+# 1. Introduction to Generative AI
+A step-by-step guide to how GenAI actually works.
+Link: https://lnkd.in/e9rWNjBE
+
+# 2. Prompt Engineering
+Real tips for improving output quality from any LLM.
+Link: https://lnkd.in/e5nekvS2
+
+# 3. Beyond Chatbots: System Prompts, RAG
+Move past surface use cases into scalable applications.
+Link: https://lnkd.in/exsX5tP7 
+
+# 4. Generative AI in Teaching & Learning
+How educators can adapt and lead with AI.
+Playlist: https://lnkd.in/erdwPRvu
+
+# 5. Teaching with AI in the Classroom
+Frameworks for trainers and educators.
+Link: https://lnkd.in/eWXskwWG
+
+# 6. The Basics of Generative AI
+No jargon. Just clarity.
+Link: https://lnkd.in/eSCJ62Bi
+
+
+BONUS 
+
+🟩 CS50x 2025 – Artificial Intelligence Lecture
+LLMs, neural nets, and real-world use cases
+Link: https://lnkd.in/eYg6vdCr
+
+🟩 CS50 Extension – AI / Prompt Engineering
+Design prompts that think with you
+Link: https://lnkd.in/eJH4DWQR
+
+🟩 GPT-4: How it works + how to build with it
+Behind the curtain on GPT-4
+Video: https://lnkd.in/eeh7QXUM
+
+🟩 LLMs and the End of Programming
+Why prompting is the new coding
+Video: https://lnkd.in/e3JbSFi7
+---
