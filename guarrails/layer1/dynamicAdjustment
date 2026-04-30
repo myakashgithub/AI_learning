@@ -1,0 +1,13 @@
+def calculate_cost(request):
+    base_cost = estimate_tokens(request.input)
+    
+    if request.uses_code_execution:
+        base_cost *= 2
+        
+    if request.uses_web_search:
+        base_cost += 1000  # Fixed cost per search
+        
+    if request.context_length > 10000:
+        base_cost *= 1.5  # Premium for long context
+        
+    return base_cost
