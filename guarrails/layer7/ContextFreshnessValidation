@@ -1,0 +1,787 @@
+# File: guardrails/layer7/context_freshness.py
+
+from typing import Dict, List, Optional, Any, Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+import threading
+import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
+
+class DataCategory(Enum):
+    """Categories of data with different freshness requirements"""
+    FINANCIAL_REALTIME = "financial_realtime"
+    PAYMENT_AUTH = "payment_auth"
+    MEDICAL_DATA = "medical_data"
+    INVENTORY = "inventory"
+    USER_PERMISSIONS = "user_permissions"
+    SESSION_TOKEN = "session_token"
+    WEATHER_DATA = "weather_data"
+    NEWS_CONTENT = "news_content"
+    USER_PREFERENCES = "user_preferences"
+    SYSTEM_CONFIG = "system_config"
+    ANALYTICS_DATA = "analytics_data"
+    GENERAL_DATA = "general_data"
+
+@dataclass
+class FreshnessRequirement:
+    """Freshness requirement for data category"""
+    category: DataCategory
+    max_age_seconds: float
+    requires_lock: bool
+    allow_caching: bool
+    version_tracking: bool
+    revalidate_on_use: bool
+
+@dataclass
+class ContextData:
+    """Context data with freshness metadata"""
+    key: str
+    value: Any
+    category: DataCategory
+    created_at: datetime
+    last_accessed: datetime
+    version: int
+    etag: str  # Entity tag for change detection
+    source: str
+    metadata: Dict
+
+@dataclass
+class FreshnessViolation:
+    """Detected freshness violation"""
+    key: str
+    category: str
+    age_seconds: float
+    max_age_seconds: float
+    severity: str
+    action_taken: str
+    detected_at: datetime
+
+class ContextFreshnessValidator:
+    """
+    Validate and enforce context data freshness requirements.
+    
+    Features:
+    - Category-based freshness requirements
+    - Automatic staleness detection
+    - TOCTOU attack prevention
+    - Version tracking and ETags
+    - Cache invalidation
+    - Real-time revalidation
+    - Freshness monitoring
+    """
+    
+    def __init__(self):
+        # Context store
+        self.context_store = {}  # {key: ContextData}
+        
+        # Freshness requirements
+        self.freshness_requirements = self._define_freshness_requirements()
+        
+        # Access locks (for TOCTOU prevention)
+        self.access_locks = {}  # {key: threading.Lock}
+        
+        # Violations tracking
+        self.violations = []
+        
+        # Refresh callbacks
+        self.refresh_callbacks = {}  # {key: Callable}
+        
+        # Version registry
+        self.version_registry = {}  # {key: latest_version}
+        
+        # Background refresh threads
+        self.refresh_threads = {}
+    
+    def store_context(
+        self,
+        key: str,
+        value: Any,
+        category: DataCategory,
+        source: str = "unknown",
+        metadata: Dict = None,
+        refresh_callback: Optional[Callable] = None
+    ) -> ContextData:
+        """
+        Store context data with freshness tracking.
+        
+        Args:
+            key: Unique key for context data
+            value: The data value
+            category: Data category (determines freshness requirements)
+            source: Data source identifier
+            metadata: Additional metadata
+            refresh_callback: Optional callback to refresh data
+            
+        Returns:
+            ContextData
+        """
+        
+        now = datetime.utcnow()
+        
+        # Generate version and ETag
+        if key in self.version_registry:
+            version = self.version_registry[key] + 1
+        else:
+            version = 1
+        
+        self.version_registry[key] = version
+        
+        # Generate ETag (hash of value)
+        etag = self._generate_etag(value)
+        
+        # Create context data
+        context_data = ContextData(
+            key=key,
+            value=value,
+            category=category,
+            created_at=now,
+            last_accessed=now,
+            version=version,
+            etag=etag,
+            source=source,
+            metadata=metadata or {}
+        )
+        
+        # Store
+        self.context_store[key] = context_data
+        
+        # Create lock if needed
+        requirement = self.freshness_requirements[category]
+        if requirement.requires_lock:
+            if key not in self.access_locks:
+                self.access_locks[key] = threading.Lock()
+        
+        # Register refresh callback
+        if refresh_callback:
+            self.refresh_callbacks[key] = refresh_callback
+        
+        # Start background refresh if needed
+        if not requirement.allow_caching and refresh_callback:
+            self._start_background_refresh(key, category)
+        
+        logger.info(f"Context stored: {key} (category: {category.value}, version: {version})")
+        
+        return context_data
+    
+    def get_context(
+        self,
+        key: str,
+        enforce_freshness: bool = True,
+        lock_for_update: bool = False
+    ) -> Dict:
+        """
+        Retrieve context data with freshness validation.
+        
+        Args:
+            key: Context key
+            enforce_freshness: Whether to enforce freshness requirements
+            lock_for_update: Lock data for atomic update (TOCTOU prevention)
+            
+        Returns:
+            {
+                'valid': bool,
+                'data': Any,
+                'age_seconds': float,
+                'stale': bool,
+                'version': int,
+                'lock_held': bool,
+                'violation': FreshnessViolation (if violated)
+            }
+        """
+        
+        if key not in self.context_store:
+            return {
+                'valid': False,
+                'data': None,
+                'stale': True,
+                'error': 'key_not_found'
+            }
+        
+        context_data = self.context_store[key]
+        requirement = self.freshness_requirements[context_data.category]
+        
+        # Acquire lock if needed
+        lock_held = False
+        if lock_for_update and key in self.access_locks:
+            self.access_locks[key].acquire()
+            lock_held = True
+        
+        # Update last accessed
+        context_data.last_accessed = datetime.utcnow()
+        
+        # Calculate age
+        age_seconds = (datetime.utcnow() - context_data.created_at).total_seconds()
+        
+        # Check freshness
+        is_stale = age_seconds > requirement.max_age_seconds
+        
+        if enforce_freshness and is_stale:
+            # Data is stale
+            violation = FreshnessViolation(
+                key=key,
+                category=context_data.category.value,
+                age_seconds=age_seconds,
+                max_age_seconds=requirement.max_age_seconds,
+                severity=self._calculate_violation_severity(age_seconds, requirement.max_age_seconds),
+                action_taken='blocked' if not requirement.allow_caching else 'warning',
+                detected_at=datetime.utcnow()
+            )
+            
+            self.violations.append(violation)
+            
+            # Keep only recent violations
+            if len(self.violations) > 10000:
+                self.violations = self.violations[-10000:]
+            
+            logger.warning(
+                f"Freshness violation: {key} "
+                f"(age: {age_seconds:.1f}s, max: {requirement.max_age_seconds}s)"
+            )
+            
+            # Release lock if held
+            if lock_held:
+                self.access_locks[key].release()
+                lock_held = False
+            
+            # Attempt refresh if callback available
+            if key in self.refresh_callbacks and requirement.revalidate_on_use:
+                refreshed = self._refresh_data(key)
+                if refreshed:
+                    # Retry get after refresh
+                    return self.get_context(key, enforce_freshness, lock_for_update)
+            
+            return {
+                'valid': False,
+                'data': None,
+                'age_seconds': age_seconds,
+                'stale': True,
+                'version': context_data.version,
+                'lock_held': False,
+                'violation': violation
+            }
+        
+        return {
+            'valid': True,
+            'data': context_data.value,
+            'age_seconds': age_seconds,
+            'stale': is_stale,
+            'version': context_data.version,
+            'etag': context_data.etag,
+            'lock_held': lock_held
+        }
+    
+    def release_lock(self, key: str):
+        """Release lock on context data"""
+        
+        if key in self.access_locks:
+            try:
+                self.access_locks[key].release()
+                logger.debug(f"Lock released: {key}")
+            except:
+                pass  # Lock wasn't held
+    
+    def update_context(
+        self,
+        key: str,
+        new_value: Any,
+        expected_version: Optional[int] = None
+    ) -> Dict:
+        """
+        Update context data with optimistic locking.
+        
+        Args:
+            key: Context key
+            new_value: New value
+            expected_version: Expected current version (for optimistic locking)
+            
+        Returns:
+            {
+                'success': bool,
+                'version': int,
+                'conflict': bool
+            }
+        """
+        
+        if key not in self.context_store:
+            return {
+                'success': False,
+                'error': 'key_not_found'
+            }
+        
+        context_data = self.context_store[key]
+        
+        # Check version conflict (optimistic locking)
+        if expected_version is not None:
+            if context_data.version != expected_version:
+                logger.warning(
+                    f"Version conflict: {key} "
+                    f"(expected: {expected_version}, actual: {context_data.version})"
+                )
+                return {
+                    'success': False,
+                    'conflict': True,
+                    'current_version': context_data.version,
+                    'expected_version': expected_version
+                }
+        
+        # Update data
+        now = datetime.utcnow()
+        new_version = context_data.version + 1
+        new_etag = self._generate_etag(new_value)
+        
+        context_data.value = new_value
+        context_data.version = new_version
+        context_data.etag = new_etag
+        context_data.created_at = now
+        context_data.last_accessed = now
+        
+        self.version_registry[key] = new_version
+        
+        logger.info(f"Context updated: {key} (version: {new_version})")
+        
+        return {
+            'success': True,
+            'version': new_version,
+            'conflict': False
+        }
+    
+    def invalidate_context(self, key: str):
+        """Invalidate (delete) context data"""
+        
+        if key in self.context_store:
+            del self.context_store[key]
+            logger.info(f"Context invalidated: {key}")
+        
+        # Stop background refresh if running
+        if key in self.refresh_threads:
+            # Signal thread to stop (implementation dependent)
+            pass
+    
+    def validate_freshness_batch(
+        self,
+        keys: List[str]
+    ) -> Dict[str, Dict]:
+        """
+        Validate freshness for multiple context items.
+        
+        Returns:
+            {key: validation_result}
+        """
+        
+        results = {}
+        
+        for key in keys:
+            result = self.get_context(key, enforce_freshness=True)
+            results[key] = result
+        
+        return results
+    
+    def get_stale_contexts(self) -> List[str]:
+        """Get list of stale context keys"""
+        
+        stale_keys = []
+        
+        for key, context_data in self.context_store.items():
+            requirement = self.freshness_requirements[context_data.category]
+            age_seconds = (datetime.utcnow() - context_data.created_at).total_seconds()
+            
+            if age_seconds > requirement.max_age_seconds:
+                stale_keys.append(key)
+        
+        return stale_keys
+    
+    def refresh_stale_contexts(self) -> int:
+        """
+        Refresh all stale contexts that have refresh callbacks.
+        
+        Returns:
+            Number of contexts refreshed
+        """
+        
+        stale_keys = self.get_stale_contexts()
+        refreshed = 0
+        
+        for key in stale_keys:
+            if key in self.refresh_callbacks:
+                if self._refresh_data(key):
+                    refreshed += 1
+        
+        logger.info(f"Refreshed {refreshed} stale contexts")
+        
+        return refreshed
+    
+    def check_toctou_vulnerability(
+        self,
+        key: str,
+        check_callback: Callable[[Any], bool],
+        use_callback: Callable[[Any], Any],
+        max_delay_seconds: float = 0.1
+    ) -> Dict:
+        """
+        Execute time-of-check to time-of-use safe operation.
+        
+        Args:
+            key: Context key
+            check_callback: Function to check condition
+            use_callback: Function to use data
+            max_delay_seconds: Maximum allowed delay between check and use
+            
+        Returns:
+            {
+                'success': bool,
+                'result': Any,
+                'toctou_safe': bool,
+                'delay_seconds': float
+            }
+        """
+        
+        if key not in self.access_locks:
+            self.access_locks[key] = threading.Lock()
+        
+        with self.access_locks[key]:
+            # Get context with lock
+            check_time = datetime.utcnow()
+            context_result = self.get_context(key, enforce_freshness=True)
+            
+            if not context_result['valid']:
+                return {
+                    'success': False,
+                    'toctou_safe': False,
+                    'error': 'invalid_context'
+                }
+            
+            data = context_result['data']
+            
+            # Perform check
+            check_passed = check_callback(data)
+            
+            if not check_passed:
+                return {
+                    'success': False,
+                    'toctou_safe': True,
+                    'error': 'check_failed'
+                }
+            
+            # Perform use
+            use_time = datetime.utcnow()
+            delay_seconds = (use_time - check_time).total_seconds()
+            
+            if delay_seconds > max_delay_seconds:
+                logger.warning(
+                    f"TOCTOU delay too large: {key} "
+                    f"({delay_seconds:.3f}s > {max_delay_seconds}s)"
+                )
+                return {
+                    'success': False,
+                    'toctou_safe': False,
+                    'delay_seconds': delay_seconds,
+                    'error': 'delay_exceeded'
+                }
+            
+            # Re-validate data hasn't changed
+            current_context = self.get_context(key, enforce_freshness=True)
+            
+            if current_context['version'] != context_result['version']:
+                logger.warning(f"TOCTOU race condition detected: {key}")
+                return {
+                    'success': False,
+                    'toctou_safe': True,  # We detected and prevented it
+                    'error': 'version_changed'
+                }
+            
+            # Execute use operation
+            result = use_callback(data)
+            
+            return {
+                'success': True,
+                'result': result,
+                'toctou_safe': True,
+                'delay_seconds': delay_seconds
+            }
+    
+    def _refresh_data(self, key: str) -> bool:
+        """Refresh context data using callback"""
+        
+        if key not in self.refresh_callbacks:
+            return False
+        
+        try:
+            callback = self.refresh_callbacks[key]
+            new_value = callback()
+            
+            if new_value is not None:
+                context_data = self.context_store[key]
+                
+                # Update with new data
+                self.update_context(key, new_value)
+                
+                logger.info(f"Context refreshed: {key}")
+                return True
+        
+        except Exception as e:
+            logger.error(f"Failed to refresh context {key}: {e}")
+        
+        return False
+    
+    def _start_background_refresh(self, key: str, category: DataCategory):
+        """Start background refresh thread for context"""
+        
+        requirement = self.freshness_requirements[category]
+        
+        if requirement.allow_caching:
+            return  # No background refresh for cacheable data
+        
+        # Background refresh implementation would go here
+        # For production: use proper thread management
+        pass
+    
+    def _generate_etag(self, value: Any) -> str:
+        """Generate ETag for value"""
+        
+        import json
+        
+        try:
+            value_str = json.dumps(value, sort_keys=True)
+        except:
+            value_str = str(value)
+        
+        return hashlib.sha256(value_str.encode()).hexdigest()[:16]
+    
+    def _calculate_violation_severity(
+        self,
+        age_seconds: float,
+        max_age_seconds: float
+    ) -> str:
+        """Calculate severity of freshness violation"""
+        
+        ratio = age_seconds / max_age_seconds if max_age_seconds > 0 else float('inf')
+        
+        if ratio > 10:
+            return 'critical'
+        elif ratio > 5:
+            return 'high'
+        elif ratio > 2:
+            return 'medium'
+        else:
+            return 'low'
+    
+    def _define_freshness_requirements(self) -> Dict[DataCategory, FreshnessRequirement]:
+        """Define freshness requirements for each data category"""
+        
+        return {
+            DataCategory.FINANCIAL_REALTIME: FreshnessRequirement(
+                category=DataCategory.FINANCIAL_REALTIME,
+                max_age_seconds=5.0,
+                requires_lock=True,
+                allow_caching=False,
+                version_tracking=True,
+                revalidate_on_use=True
+            ),
+            
+            DataCategory.PAYMENT_AUTH: FreshnessRequirement(
+                category=DataCategory.PAYMENT_AUTH,
+                max_age_seconds=0.0,  # Always fresh
+                requires_lock=True,
+                allow_caching=False,
+                version_tracking=True,
+                revalidate_on_use=True
+            ),
+            
+            DataCategory.MEDICAL_DATA: FreshnessRequirement(
+                category=DataCategory.MEDICAL_DATA,
+                max_age_seconds=1800.0,  # 30 minutes
+                requires_lock=False,
+                allow_caching=True,
+                version_tracking=True,
+                revalidate_on_use=True
+            ),
+            
+            DataCategory.INVENTORY: FreshnessRequirement(
+                category=DataCategory.INVENTORY,
+                max_age_seconds=10.0,
+                requires_lock=True,
+                allow_caching=True,
+                version_tracking=True,
+                revalidate_on_use=True
+            ),
+            
+            DataCategory.USER_PERMISSIONS: FreshnessRequirement(
+                category=DataCategory.USER_PERMISSIONS,
+                max_age_seconds=60.0,  # 1 minute
+                requires_lock=False,
+                allow_caching=True,
+                version_tracking=True,
+                revalidate_on_use=True
+            ),
+            
+            DataCategory.SESSION_TOKEN: FreshnessRequirement(
+                category=DataCategory.SESSION_TOKEN,
+                max_age_seconds=0.0,  # Real-time
+                requires_lock=False,
+                allow_caching=False,
+                version_tracking=True,
+                revalidate_on_use=True
+            ),
+            
+            DataCategory.WEATHER_DATA: FreshnessRequirement(
+                category=DataCategory.WEATHER_DATA,
+                max_age_seconds=300.0,  # 5 minutes
+                requires_lock=False,
+                allow_caching=True,
+                version_tracking=False,
+                revalidate_on_use=False
+            ),
+            
+            DataCategory.NEWS_CONTENT: FreshnessRequirement(
+                category=DataCategory.NEWS_CONTENT,
+                max_age_seconds=900.0,  # 15 minutes
+                requires_lock=False,
+                allow_caching=True,
+                version_tracking=False,
+                revalidate_on_use=False
+            ),
+            
+            DataCategory.USER_PREFERENCES: FreshnessRequirement(
+                category=DataCategory.USER_PREFERENCES,
+                max_age_seconds=86400.0,  # 1 day
+                requires_lock=False,
+                allow_caching=True,
+                version_tracking=True,
+                revalidate_on_use=False
+            ),
+            
+            DataCategory.SYSTEM_CONFIG: FreshnessRequirement(
+                category=DataCategory.SYSTEM_CONFIG,
+                max_age_seconds=0.0,  # Real-time
+                requires_lock=False,
+                allow_caching=False,
+                version_tracking=True,
+                revalidate_on_use=True
+            ),
+            
+            DataCategory.ANALYTICS_DATA: FreshnessRequirement(
+                category=DataCategory.ANALYTICS_DATA,
+                max_age_seconds=3600.0,  # 1 hour
+                requires_lock=False,
+                allow_caching=True,
+                version_tracking=False,
+                revalidate_on_use=False
+            ),
+            
+            DataCategory.GENERAL_DATA: FreshnessRequirement(
+                category=DataCategory.GENERAL_DATA,
+                max_age_seconds=600.0,  # 10 minutes
+                requires_lock=False,
+                allow_caching=True,
+                version_tracking=False,
+                revalidate_on_use=False
+            )
+        }
+
+
+# Example usage
+if __name__ == "__main__":
+    validator = ContextFreshnessValidator()
+    
+    # Example 1: Financial data with real-time requirement
+    def fetch_stock_price():
+        # Simulated API call
+        import random
+        return {'symbol': 'AAPL', 'price': 150.0 + random.uniform(-5, 5)}
+    
+    # Store financial data
+    validator.store_context(
+        key='stock_AAPL',
+        value={'symbol': 'AAPL', 'price': 150.0},
+        category=DataCategory.FINANCIAL_REALTIME,
+        source='market_api',
+        refresh_callback=fetch_stock_price
+    )
+    
+    # Get fresh data (within 5 seconds)
+    result = validator.get_context('stock_AAPL')
+    print(f"Stock data retrieved:")
+    print(f"  Valid: {result['valid']}")
+    print(f"  Age: {result['age_seconds']:.2f}s")
+    print(f"  Data: {result['data']}")
+    
+    # Simulate staleness
+    import time
+    time.sleep(6)
+    
+    # Try to get stale data
+    stale_result = validator.get_context('stock_AAPL', enforce_freshness=True)
+    print(f"\nAfter 6 seconds (stale):")
+    print(f"  Valid: {stale_result['valid']}")
+    print(f"  Stale: {stale_result['stale']}")
+    if 'violation' in stale_result:
+        violation = stale_result['violation']
+        print(f"  Violation severity: {violation.severity}")
+    
+    # Example 2: TOCTOU-safe operation
+    validator.store_context(
+        key='account_balance',
+        value={'balance': 100.0},
+        category=DataCategory.PAYMENT_AUTH
+    )
+    
+    def check_sufficient_funds(data):
+        return data['balance'] >= 50.0
+    
+    def process_payment(data):
+        # Deduct payment
+        return {'success': True, 'new_balance': data['balance'] - 50.0}
+    
+    toctou_result = validator.check_toctou_vulnerability(
+        key='account_balance',
+        check_callback=check_sufficient_funds,
+        use_callback=process_payment,
+        max_delay_seconds=0.1
+    )
+    
+    print(f"\nTOCTOU-safe payment:")
+    print(f"  Success: {toctou_result['success']}")
+    print(f"  TOCTOU safe: {toctou_result['toctou_safe']}")
+    print(f"  Delay: {toctou_result.get('delay_seconds', 0):.3f}s")
+    if toctou_result['success']:
+        print(f"  Result: {toctou_result['result']}")
+    
+    # Example 3: Optimistic locking
+    validator.store_context(
+        key='inventory_item_123',
+        value={'item_id': 123, 'quantity': 5},
+        category=DataCategory.INVENTORY
+    )
+    
+    # Get current version
+    inventory_result = validator.get_context('inventory_item_123')
+    current_version = inventory_result['version']
+    
+    print(f"\nInventory item:")
+    print(f"  Current version: {current_version}")
+    print(f"  Quantity: {inventory_result['data']['quantity']}")
+    
+    # Update with version check
+    update_result = validator.update_context(
+        key='inventory_item_123',
+        new_value={'item_id': 123, 'quantity': 4},
+        expected_version=current_version
+    )
+    
+    print(f"\nUpdate with optimistic locking:")
+    print(f"  Success: {update_result['success']}")
+    print(f"  New version: {update_result.get('version', 'N/A')}")
+    
+    # Try update with wrong version (conflict)
+    conflict_result = validator.update_context(
+        key='inventory_item_123',
+        new_value={'item_id': 123, 'quantity': 3},
+        expected_version=current_version  # Old version
+    )
+    
+    print(f"\nUpdate with version conflict:")
+    print(f"  Success: {conflict_result['success']}")
+    print(f"  Conflict: {conflict_result.get('conflict', False)}")
