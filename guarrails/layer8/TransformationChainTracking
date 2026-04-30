@@ -1,0 +1,704 @@
+# File: guardrails/layer8/transformation_tracking.py
+
+from typing import Dict, List, Optional, Any, Set
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+import hashlib
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+class TransformationType(Enum):
+    """Types of transformations"""
+    SUMMARIZATION = "summarization"
+    TRANSLATION = "translation"
+    PARAPHRASING = "paraphrasing"
+    EXTRACTION = "extraction"
+    AGGREGATION = "aggregation"
+    FILTERING = "filtering"
+    ENRICHMENT = "enrichment"
+    DIRECT_QUOTE = "direct_quote"
+    CUSTOM = "custom"
+
+@dataclass
+class TransformationStep:
+    """Single transformation in the chain"""
+    step_id: str
+    transformation_type: TransformationType
+    input_hash: str
+    output_hash: str
+    input_length: int
+    output_length: int
+    compression_ratio: float
+    is_lossy: bool
+    timestamp: datetime
+    metadata: Dict
+    confidence_score: float  # How confident in accuracy (0-1)
+
+@dataclass
+class TransformationChain:
+    """Complete transformation chain"""
+    chain_id: str
+    source_id: str
+    steps: List[TransformationStep]
+    current_content: str
+    current_hash: str
+    total_depth: int
+    cumulative_loss: float
+    confidence_score: float
+    created_at: datetime
+    last_modified: datetime
+
+@dataclass
+class ChainValidation:
+    """Validation result for transformation chain"""
+    valid: bool
+    depth_ok: bool
+    loss_ok: bool
+    confidence_ok: bool
+    integrity_ok: bool
+    violations: List[str]
+    warnings: List[str]
+
+class TransformationChainTracker:
+    """
+    Track information transformations through processing pipeline.
+    
+    Features:
+    - Complete transformation history
+    - Lossy transformation detection
+    - Depth limit enforcement
+    - Confidence degradation tracking
+    - Bidirectional traceability
+    - Integrity verification
+    - Error propagation analysis
+    """
+    
+    def __init__(self):
+        # Transformation chains
+        self.chains = {}  # {chain_id: TransformationChain}
+        
+        # Original content store
+        self.original_content = {}  # {source_id: content}
+        
+        # Transformation limits
+        self.limits = {
+            'max_total_depth': 5,
+            'max_lossy_depth': 3,
+            'max_cumulative_loss': 0.7,  # 70% information loss
+            'min_confidence': 0.3,
+            'max_compression_ratio': 0.1  # Output can't be <10% of input
+        }
+        
+        # Transformation type configurations
+        self.transformation_configs = self._define_transformation_configs()
+    
+    def create_chain(
+        self,
+        source_id: str,
+        original_content: str,
+        metadata: Dict = None
+    ) -> str:
+        """
+        Create new transformation chain.
+        
+        Args:
+            source_id: Source identifier
+            original_content: Original content
+            metadata: Additional metadata
+            
+        Returns:
+            chain_id
+        """
+        
+        chain_id = hashlib.sha256(
+            f"{source_id}:{datetime.utcnow().isoformat()}".encode()
+        ).hexdigest()[:16]
+        
+        # Store original content
+        self.original_content[source_id] = original_content
+        
+        # Create chain
+        chain = TransformationChain(
+            chain_id=chain_id,
+            source_id=source_id,
+            steps=[],
+            current_content=original_content,
+            current_hash=self._hash_content(original_content),
+            total_depth=0,
+            cumulative_loss=0.0,
+            confidence_score=1.0,
+            created_at=datetime.utcnow(),
+            last_modified=datetime.utcnow()
+        )
+        
+        self.chains[chain_id] = chain
+        
+        logger.info(f"Transformation chain created: {chain_id} (source: {source_id})")
+        
+        return chain_id
+    
+    def add_transformation(
+        self,
+        chain_id: str,
+        transformation_type: TransformationType,
+        output_content: str,
+        metadata: Dict = None
+    ) -> Dict:
+        """
+        Add transformation step to chain.
+        
+        Args:
+            chain_id: Chain identifier
+            transformation_type: Type of transformation
+            output_content: Transformed content
+            metadata: Additional metadata
+            
+        Returns:
+            {
+                'success': bool,
+                'step_id': str,
+                'validation': ChainValidation,
+                'confidence': float
+            }
+        """
+        
+        if chain_id not in self.chains:
+            return {
+                'success': False,
+                'error': 'Chain not found'
+            }
+        
+        chain = self.chains[chain_id]
+        config = self.transformation_configs[transformation_type]
+        
+        # Create transformation step
+        input_content = chain.current_content
+        input_hash = chain.current_hash
+        output_hash = self._hash_content(output_content)
+        
+        input_length = len(input_content)
+        output_length = len(output_content)
+        compression_ratio = output_length / input_length if input_length > 0 else 0
+        
+        # Calculate confidence degradation
+        confidence_degradation = config['confidence_degradation']
+        
+        # Additional degradation for high compression
+        if compression_ratio < 0.5:  # More than 50% reduction
+            confidence_degradation += 0.1
+        
+        new_confidence = max(0.0, chain.confidence_score - confidence_degradation)
+        
+        # Calculate information loss
+        information_loss = config['base_loss']
+        if config['is_lossy']:
+            # Estimate loss based on compression
+            information_loss += (1 - compression_ratio) * 0.3
+        
+        step_id = f"{chain_id}_step_{len(chain.steps) + 1}"
+        
+        step = TransformationStep(
+            step_id=step_id,
+            transformation_type=transformation_type,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            input_length=input_length,
+            output_length=output_length,
+            compression_ratio=compression_ratio,
+            is_lossy=config['is_lossy'],
+            timestamp=datetime.utcnow(),
+            metadata=metadata or {},
+            confidence_score=new_confidence
+        )
+        
+        # Update chain
+        chain.steps.append(step)
+        chain.current_content = output_content
+        chain.current_hash = output_hash
+        chain.total_depth += 1
+        chain.cumulative_loss = min(1.0, chain.cumulative_loss + information_loss)
+        chain.confidence_score = new_confidence
+        chain.last_modified = datetime.utcnow()
+        
+        # Validate chain
+        validation = self.validate_chain(chain_id)
+        
+        logger.info(
+            f"Transformation added: {step_id} "
+            f"(type: {transformation_type.value}, "
+            f"compression: {compression_ratio:.2f}, "
+            f"confidence: {new_confidence:.2f})"
+        )
+        
+        return {
+            'success': True,
+            'step_id': step_id,
+            'validation': validation,
+            'confidence': new_confidence,
+            'cumulative_loss': chain.cumulative_loss
+        }
+    
+    def validate_chain(self, chain_id: str) -> ChainValidation:
+        """
+        Validate transformation chain against limits.
+        
+        Returns:
+            ChainValidation
+        """
+        
+        if chain_id not in self.chains:
+            return ChainValidation(
+                valid=False,
+                depth_ok=False,
+                loss_ok=False,
+                confidence_ok=False,
+                integrity_ok=False,
+                violations=['Chain not found'],
+                warnings=[]
+            )
+        
+        chain = self.chains[chain_id]
+        violations = []
+        warnings = []
+        
+        # Check 1: Total depth
+        depth_ok = chain.total_depth <= self.limits['max_total_depth']
+        if not depth_ok:
+            violations.append(
+                f"Total depth ({chain.total_depth}) exceeds limit "
+                f"({self.limits['max_total_depth']})"
+            )
+        elif chain.total_depth >= self.limits['max_total_depth'] * 0.8:
+            warnings.append("Approaching maximum transformation depth")
+        
+        # Check 2: Lossy transformation depth
+        lossy_depth = sum(1 for step in chain.steps if step.is_lossy)
+        lossy_ok = lossy_depth <= self.limits['max_lossy_depth']
+        if not lossy_ok:
+            violations.append(
+                f"Lossy transformations ({lossy_depth}) exceed limit "
+                f"({self.limits['max_lossy_depth']})"
+            )
+        
+        # Check 3: Cumulative loss
+        loss_ok = chain.cumulative_loss <= self.limits['max_cumulative_loss']
+        if not loss_ok:
+            violations.append(
+                f"Cumulative information loss ({chain.cumulative_loss:.1%}) "
+                f"exceeds limit ({self.limits['max_cumulative_loss']:.1%})"
+            )
+        elif chain.cumulative_loss >= self.limits['max_cumulative_loss'] * 0.8:
+            warnings.append("High cumulative information loss")
+        
+        # Check 4: Confidence score
+        confidence_ok = chain.confidence_score >= self.limits['min_confidence']
+        if not confidence_ok:
+            violations.append(
+                f"Confidence score ({chain.confidence_score:.2f}) below minimum "
+                f"({self.limits['min_confidence']})"
+            )
+        elif chain.confidence_score < self.limits['min_confidence'] * 1.5:
+            warnings.append("Low confidence in transformed content")
+        
+        # Check 5: Integrity verification
+        integrity_ok = self._verify_chain_integrity(chain)
+        if not integrity_ok:
+            violations.append("Chain integrity verification failed")
+        
+        valid = depth_ok and lossy_ok and loss_ok and confidence_ok and integrity_ok
+        
+        return ChainValidation(
+            valid=valid,
+            depth_ok=depth_ok,
+            loss_ok=loss_ok,
+            confidence_ok=confidence_ok,
+            integrity_ok=integrity_ok,
+            violations=violations,
+            warnings=warnings
+        )
+    
+    def get_chain(self, chain_id: str) -> Optional[TransformationChain]:
+        """Retrieve transformation chain"""
+        return self.chains.get(chain_id)
+    
+    def trace_to_source(self, chain_id: str) -> Dict:
+        """
+        Trace content back to original source.
+        
+        Returns:
+            {
+                'source_id': str,
+                'original_content': str,
+                'transformation_path': List[str],
+                'total_steps': int,
+                'confidence_degradation': float
+            }
+        """
+        
+        if chain_id not in self.chains:
+            return {'error': 'Chain not found'}
+        
+        chain = self.chains[chain_id]
+        
+        # Build transformation path
+        path = [
+            f"{step.transformation_type.value} "
+            f"(compression: {step.compression_ratio:.1%}, "
+            f"confidence: {step.confidence_score:.2f})"
+            for step in chain.steps
+        ]
+        
+        original_content = self.original_content.get(chain.source_id, '')
+        
+        confidence_degradation = 1.0 - chain.confidence_score
+        
+        return {
+            'source_id': chain.source_id,
+            'original_content': original_content,
+            'transformation_path': path,
+            'total_steps': chain.total_depth,
+            'confidence_degradation': confidence_degradation,
+            'cumulative_loss': chain.cumulative_loss
+        }
+    
+    def get_intermediate_version(
+        self,
+        chain_id: str,
+        step_number: int
+    ) -> Optional[str]:
+        """
+        Get content at specific step in transformation chain.
+        Note: This is simplified - in production, would store intermediate versions.
+        
+        Returns:
+            Content at specified step or None
+        """
+        
+        if chain_id not in self.chains:
+            return None
+        
+        chain = self.chains[chain_id]
+        
+        if step_number < 0 or step_number > len(chain.steps):
+            return None
+        
+        if step_number == 0:
+            # Original content
+            return self.original_content.get(chain.source_id, '')
+        
+        # In production: store intermediate versions
+        # For now: return current if last step, else None
+        if step_number == len(chain.steps):
+            return chain.current_content
+        
+        return None
+    
+    def compare_versions(
+        self,
+        chain_id: str,
+        step1: int,
+        step2: int
+    ) -> Dict:
+        """
+        Compare content at two steps.
+        
+        Returns:
+            {
+                'similarity': float,
+                'length_change': float,
+                'information_preserved': float
+            }
+        """
+        
+        content1 = self.get_intermediate_version(chain_id, step1)
+        content2 = self.get_intermediate_version(chain_id, step2)
+        
+        if not content1 or not content2:
+            return {'error': 'Could not retrieve versions'}
+        
+        # Calculate similarity (simplified - use proper NLP in production)
+        similarity = self._calculate_similarity(content1, content2)
+        
+        length_change = len(content2) / len(content1) if len(content1) > 0 else 0
+        
+        # Estimate information preservation
+        information_preserved = similarity * length_change
+        
+        return {
+            'similarity': similarity,
+            'length_change': length_change,
+            'information_preserved': information_preserved
+        }
+    
+    def detect_error_propagation(self, chain_id: str) -> Dict:
+        """
+        Detect if errors are propagating through chain.
+        
+        Returns:
+            {
+                'error_detected': bool,
+                'error_steps': List[int],
+                'severity': str
+            }
+        """
+        
+        if chain_id not in self.chains:
+            return {'error': 'Chain not found'}
+        
+        chain = self.chains[chain_id]
+        error_steps = []
+        
+        # Check for sudden confidence drops
+        for i, step in enumerate(chain.steps):
+            if i > 0:
+                prev_confidence = chain.steps[i-1].confidence_score
+                confidence_drop = prev_confidence - step.confidence_score
+                
+                # Sudden drop indicates potential error
+                if confidence_drop > 0.2:  # 20% drop
+                    error_steps.append(i)
+        
+        # Check for excessive compression
+        for i, step in enumerate(chain.steps):
+            if step.compression_ratio < self.limits['max_compression_ratio']:
+                error_steps.append(i)
+        
+        error_detected = len(error_steps) > 0
+        
+        # Determine severity
+        if len(error_steps) >= 3:
+            severity = 'high'
+        elif len(error_steps) >= 2:
+            severity = 'medium'
+        elif len(error_steps) >= 1:
+            severity = 'low'
+        else:
+            severity = 'none'
+        
+        return {
+            'error_detected': error_detected,
+            'error_steps': error_steps,
+            'severity': severity
+        }
+    
+    def _verify_chain_integrity(self, chain: TransformationChain) -> bool:
+        """Verify chain integrity through hash checking"""
+        
+        if not chain.steps:
+            return True
+        
+        # Verify first step starts with current hash
+        # (In production: would verify entire chain)
+        
+        # Verify output hash of last step matches current
+        if chain.steps:
+            last_step = chain.steps[-1]
+            if last_step.output_hash != chain.current_hash:
+                logger.error(f"Chain integrity violation: hash mismatch")
+                return False
+        
+        return True
+    
+    def _calculate_similarity(self, text1: str, text2: str) -> float:
+        """
+        Calculate similarity between two texts.
+        Simplified - use proper NLP similarity in production.
+        """
+        
+        # Simple word overlap similarity
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        overlap = len(words1 & words2)
+        union = len(words1 | words2)
+        
+        return overlap / union if union > 0 else 0.0
+    
+    def _hash_content(self, content: str) -> str:
+        """Generate hash for content"""
+        return hashlib.sha256(content.encode()).hexdigest()[:16]
+    
+    def _define_transformation_configs(self) -> Dict:
+        """Define configuration for each transformation type"""
+        
+        return {
+            TransformationType.SUMMARIZATION: {
+                'is_lossy': True,
+                'base_loss': 0.3,
+                'confidence_degradation': 0.15,
+                'max_depth': 3
+            },
+            
+            TransformationType.TRANSLATION: {
+                'is_lossy': True,
+                'base_loss': 0.15,
+                'confidence_degradation': 0.1,
+                'max_depth': 2
+            },
+            
+            TransformationType.PARAPHRASING: {
+                'is_lossy': True,
+                'base_loss': 0.1,
+                'confidence_degradation': 0.05,
+                'max_depth': 3
+            },
+            
+            TransformationType.EXTRACTION: {
+                'is_lossy': True,
+                'base_loss': 0.05,
+                'confidence_degradation': 0.03,
+                'max_depth': 5
+            },
+            
+            TransformationType.AGGREGATION: {
+                'is_lossy': True,  # Can be lossy if merging conflicting info
+                'base_loss': 0.1,
+                'confidence_degradation': 0.08,
+                'max_depth': 4
+            },
+            
+            TransformationType.FILTERING: {
+                'is_lossy': True,
+                'base_loss': 0.2,
+                'confidence_degradation': 0.1,
+                'max_depth': 3
+            },
+            
+            TransformationType.ENRICHMENT: {
+                'is_lossy': False,
+                'base_loss': 0.0,
+                'confidence_degradation': 0.02,  # Small degradation from added context
+                'max_depth': 999
+            },
+            
+            TransformationType.DIRECT_QUOTE: {
+                'is_lossy': False,
+                'base_loss': 0.0,
+                'confidence_degradation': 0.0,
+                'max_depth': 999
+            },
+            
+            TransformationType.CUSTOM: {
+                'is_lossy': True,
+                'base_loss': 0.2,
+                'confidence_degradation': 0.15,
+                'max_depth': 3
+            }
+        }
+
+
+# Example usage
+if __name__ == "__main__":
+    tracker = TransformationChainTracker()
+    
+    # Original article
+    original_article = """
+    A new study published in Nature shows that a novel drug treatment
+    has demonstrated 60% effectiveness in treating a rare disease.
+    The study involved 500 patients over 2 years. Researchers noted
+    mild side effects in 15% of cases, including headache and nausea.
+    The drug works by targeting specific proteins in affected cells.
+    Lead researcher Dr. Jane Smith stated that while results are
+    promising, more research is needed before widespread adoption.
+    The study was funded by the National Institutes of Health.
+    """
+    
+    # Create chain
+    chain_id = tracker.create_chain(
+        source_id='nature_article_12345',
+        original_content=original_article,
+        metadata={'source': 'Nature', 'date': '2024-01-15'}
+    )
+    
+    print(f"Chain created: {chain_id}\n")
+    
+    # Step 1: Summarization
+    summary = """
+    New study shows novel drug is 60% effective for rare disease.
+    500 patients tested over 2 years. Mild side effects in 15% of cases.
+    More research needed before widespread use.
+    """
+    
+    result1 = tracker.add_transformation(
+        chain_id=chain_id,
+        transformation_type=TransformationType.SUMMARIZATION,
+        output_content=summary,
+        metadata={'method': 'extractive_summarization'}
+    )
+    
+    print("Step 1 - Summarization:")
+    print(f"  Success: {result1['success']}")
+    print(f"  Confidence: {result1['confidence']:.2f}")
+    print(f"  Cumulative loss: {result1['cumulative_loss']:.1%}")
+    print(f"  Valid: {result1['validation'].valid}")
+    
+    # Step 2: Further summarization
+    brief_summary = """
+    New drug 60% effective for rare disease in 500-patient study.
+    """
+    
+    result2 = tracker.add_transformation(
+        chain_id=chain_id,
+        transformation_type=TransformationType.SUMMARIZATION,
+        output_content=brief_summary
+    )
+    
+    print("\nStep 2 - Further summarization:")
+    print(f"  Confidence: {result2['confidence']:.2f}")
+    print(f"  Cumulative loss: {result2['cumulative_loss']:.1%}")
+    print(f"  Warnings: {result2['validation'].warnings}")
+    
+    # Step 3: Translation
+    translated = """
+    Nuevo medicamento 60% efectivo para enfermedad rara en estudio de 500 pacientes.
+    """
+    
+    result3 = tracker.add_transformation(
+        chain_id=chain_id,
+        transformation_type=TransformationType.TRANSLATION,
+        output_content=translated,
+        metadata={'target_language': 'Spanish'}
+    )
+    
+    print("\nStep 3 - Translation:")
+    print(f"  Confidence: {result3['confidence']:.2f}")
+    print(f"  Cumulative loss: {result3['cumulative_loss']:.1%}")
+    
+    # Validate chain
+    validation = tracker.validate_chain(chain_id)
+    
+    print(f"\nFinal validation:")
+    print(f"  Valid: {validation.valid}")
+    print(f"  Depth OK: {validation.depth_ok}")
+    print(f"  Loss OK: {validation.loss_ok}")
+    print(f"  Confidence OK: {validation.confidence_ok}")
+    if validation.violations:
+        print(f"  Violations: {validation.violations}")
+    if validation.warnings:
+        print(f"  Warnings: {validation.warnings}")
+    
+    # Trace back to source
+    trace = tracker.trace_to_source(chain_id)
+    
+    print(f"\nTraceability:")
+    print(f"  Source ID: {trace['source_id']}")
+    print(f"  Total steps: {trace['total_steps']}")
+    print(f"  Confidence degradation: {trace['confidence_degradation']:.1%}")
+    print(f"  Transformation path:")
+    for i, step in enumerate(trace['transformation_path'], 1):
+        print(f"    {i}. {step}")
+    
+    # Detect error propagation
+    error_analysis = tracker.detect_error_propagation(chain_id)
+    
+    print(f"\nError propagation analysis:")
+    print(f"  Errors detected: {error_analysis['error_detected']}")
+    print(f"  Severity: {error_analysis['severity']}")
+    if error_analysis['error_steps']:
+        print(f"  Error at steps: {error_analysis['error_steps']}")
