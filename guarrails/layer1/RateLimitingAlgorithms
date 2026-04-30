@@ -1,0 +1,22 @@
+class TokenBucket:
+    def __init__(self, capacity, refill_rate):
+        self.capacity = capacity
+        self.tokens = capacity
+        self.refill_rate = refill_rate  # tokens per second
+        self.last_refill = time.time()
+    
+    def consume(self, tokens=1):
+        # Refill based on time elapsed
+        now = time.time()
+        elapsed = now - self.last_refill
+        self.tokens = min(
+            self.capacity,
+            self.tokens + elapsed * self.refill_rate
+        )
+        self.last_refill = now
+        
+        # Check if enough tokens
+        if self.tokens >= tokens:
+            self.tokens -= tokens
+            return True
+        return False
