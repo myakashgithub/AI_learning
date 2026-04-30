@@ -1,0 +1,752 @@
+# File: guardrails/layer7/temporal_trust_decay.py
+
+from typing import Dict, List, Optional, Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+import math
+import logging
+
+logger = logging.getLogger(__name__)
+
+class TrustLevel(Enum):
+    """Trust level categories"""
+    NONE = 0
+    MINIMAL = 1
+    LOW = 2
+    MEDIUM = 3
+    HIGH = 4
+    FULL = 5
+
+class ActionRiskLevel(Enum):
+    """Risk levels for different actions"""
+    SAFE = "safe"
+    LOW_RISK = "low_risk"
+    MEDIUM_RISK = "medium_risk"
+    HIGH_RISK = "high_risk"
+    CRITICAL = "critical"
+
+@dataclass
+class TrustScore:
+    """Current trust score and metadata"""
+    score: float  # 0.0 to 1.0
+    level: TrustLevel
+    last_auth: datetime
+    last_verification: datetime
+    decay_rate: float
+    penalties_applied: int
+    context_changes: int
+
+@dataclass
+class Permission:
+    """Time-gated permission"""
+    permission_id: str
+    permission_type: str
+    granted_at: datetime
+    expires_at: Optional[datetime]
+    renewal_count: int
+    last_renewed: datetime
+    required_trust_level: TrustLevel
+
+class TemporalTrustDecayManager:
+    """
+    Manage trust decay over time with exponential decay and penalties.
+    
+    Features:
+    - Exponential trust decay over time
+    - Action-based trust penalties
+    - Context change detection
+    - Permission expiration
+    - Re-authentication triggering
+    - Trust level thresholds
+    """
+    
+    def __init__(self):
+        # User trust scores
+        self.trust_scores = {}  # {user_id: TrustScore}
+        
+        # Active permissions
+        self.permissions = {}  # {(user_id, permission_type): Permission}
+        
+        # Trust decay configuration
+        self.decay_config = {
+            'baseline_decay_rate': 0.1,      # 10% per hour baseline
+            'high_security_decay_rate': 0.3, # 30% per hour for sensitive
+            'min_trust_score': 0.0,
+            'max_trust_score': 1.0,
+            'full_trust_threshold': 0.9,
+            'high_trust_threshold': 0.7,
+            'medium_trust_threshold': 0.5,
+            'low_trust_threshold': 0.3
+        }
+        
+        # Action penalties
+        self.action_penalties = self._define_action_penalties()
+        
+        # Re-authentication triggers
+        self.reauth_triggers = self._define_reauth_triggers()
+        
+        # Permission expiration rules
+        self.permission_expirations = self._define_permission_expirations()
+    
+    def initialize_trust(
+        self,
+        user_id: str,
+        initial_score: float = 1.0,
+        decay_rate: Optional[float] = None
+    ) -> TrustScore:
+        """
+        Initialize trust score for user after authentication.
+        
+        Args:
+            user_id: User identifier
+            initial_score: Initial trust score (0.0-1.0)
+            decay_rate: Custom decay rate (optional)
+            
+        Returns:
+            TrustScore
+        """
+        
+        now = datetime.utcnow()
+        
+        trust_score = TrustScore(
+            score=min(initial_score, self.decay_config['max_trust_score']),
+            level=self._calculate_trust_level(initial_score),
+            last_auth=now,
+            last_verification=now,
+            decay_rate=decay_rate or self.decay_config['baseline_decay_rate'],
+            penalties_applied=0,
+            context_changes=0
+        )
+        
+        self.trust_scores[user_id] = trust_score
+        
+        logger.info(f"Trust initialized: {user_id} (score: {initial_score:.2f})")
+        
+        return trust_score
+    
+    def get_current_trust(
+        self,
+        user_id: str,
+        update: bool = True
+    ) -> Optional[TrustScore]:
+        """
+        Get current trust score with time-based decay applied.
+        
+        Args:
+            user_id: User identifier
+            update: Whether to update stored score
+            
+        Returns:
+            TrustScore or None
+        """
+        
+        if user_id not in self.trust_scores:
+            return None
+        
+        trust = self.trust_scores[user_id]
+        
+        # Calculate time-based decay
+        now = datetime.utcnow()
+        time_elapsed = (now - trust.last_verification).total_seconds() / 3600  # hours
+        
+        # Exponential decay formula: score * e^(-decay_rate * time)
+        decayed_score = trust.score * math.exp(-trust.decay_rate * time_elapsed)
+        
+        # Apply minimum threshold
+        decayed_score = max(decayed_score, self.decay_config['min_trust_score'])
+        
+        if update:
+            trust.score = decayed_score
+            trust.level = self._calculate_trust_level(decayed_score)
+            trust.last_verification = now
+        
+        return TrustScore(
+            score=decayed_score,
+            level=self._calculate_trust_level(decayed_score),
+            last_auth=trust.last_auth,
+            last_verification=now if update else trust.last_verification,
+            decay_rate=trust.decay_rate,
+            penalties_applied=trust.penalties_applied,
+            context_changes=trust.context_changes
+        )
+    
+    def validate_action(
+        self,
+        user_id: str,
+        action: str,
+        context: Dict = None
+    ) -> Dict:
+        """
+        Validate if current trust level allows action.
+        
+        Args:
+            user_id: User identifier
+            action: Action to validate
+            context: Action context (value, location, etc.)
+            
+        Returns:
+            {
+                'allowed': bool,
+                'current_trust': float,
+                'required_trust': float,
+                'requires_reauth': bool,
+                'reason': str
+            }
+        """
+        
+        # Get current trust
+        trust = self.get_current_trust(user_id)
+        
+        if not trust:
+            return {
+                'allowed': False,
+                'current_trust': 0.0,
+                'required_trust': 0.0,
+                'requires_reauth': True,
+                'reason': 'no_trust_score'
+            }
+        
+        # Determine required trust level for action
+        required_trust = self._get_required_trust(action, context)
+        
+        # Check if current trust meets requirement
+        if trust.score < required_trust:
+            return {
+                'allowed': False,
+                'current_trust': trust.score,
+                'required_trust': required_trust,
+                'requires_reauth': True,
+                'reason': 'insufficient_trust'
+            }
+        
+        # Check re-authentication triggers
+        reauth_check = self._check_reauth_triggers(user_id, action, context)
+        
+        if reauth_check['required']:
+            return {
+                'allowed': False,
+                'current_trust': trust.score,
+                'required_trust': required_trust,
+                'requires_reauth': True,
+                'reason': reauth_check['reason']
+            }
+        
+        return {
+            'allowed': True,
+            'current_trust': trust.score,
+            'required_trust': required_trust,
+            'requires_reauth': False
+        }
+    
+    def apply_trust_penalty(
+        self,
+        user_id: str,
+        penalty_type: str,
+        severity: float = 0.1
+    ):
+        """
+        Apply penalty to trust score.
+        
+        Args:
+            user_id: User identifier
+            penalty_type: Type of penalty
+            severity: Penalty severity (0.0-1.0)
+        """
+        
+        if user_id not in self.trust_scores:
+            return
+        
+        trust = self.trust_scores[user_id]
+        
+        # Apply penalty
+        penalty_amount = severity
+        trust.score = max(trust.score - penalty_amount, self.decay_config['min_trust_score'])
+        trust.level = self._calculate_trust_level(trust.score)
+        trust.penalties_applied += 1
+        
+        logger.warning(
+            f"Trust penalty applied: {user_id} "
+            f"(type: {penalty_type}, severity: {severity:.2f}, "
+            f"new score: {trust.score:.2f})"
+        )
+    
+    def record_action(
+        self,
+        user_id: str,
+        action: str,
+        risk_level: ActionRiskLevel,
+        context: Dict = None
+    ):
+        """
+        Record action and apply appropriate trust adjustments.
+        
+        Args:
+            user_id: User identifier
+            action: Action performed
+            risk_level: Risk level of action
+            context: Action context
+        """
+        
+        if user_id not in self.trust_scores:
+            return
+        
+        # Check for action-based penalties
+        if action in self.action_penalties:
+            penalty = self.action_penalties[action]
+            self.apply_trust_penalty(user_id, f'action_{action}', penalty)
+        
+        # Risk-based penalties
+        risk_penalties = {
+            ActionRiskLevel.SAFE: 0.0,
+            ActionRiskLevel.LOW_RISK: 0.02,
+            ActionRiskLevel.MEDIUM_RISK: 0.05,
+            ActionRiskLevel.HIGH_RISK: 0.1,
+            ActionRiskLevel.CRITICAL: 0.2
+        }
+        
+        if risk_level in risk_penalties and risk_penalties[risk_level] > 0:
+            self.apply_trust_penalty(
+                user_id,
+                f'risk_{risk_level.value}',
+                risk_penalties[risk_level]
+            )
+    
+    def record_context_change(
+        self,
+        user_id: str,
+        change_type: str,
+        old_value: str,
+        new_value: str
+    ):
+        """
+        Record context change and apply trust penalty.
+        
+        Args:
+            user_id: User identifier
+            change_type: Type of change (device, location, IP)
+            old_value: Previous value
+            new_value: New value
+        """
+        
+        if user_id not in self.trust_scores:
+            return
+        
+        trust = self.trust_scores[user_id]
+        trust.context_changes += 1
+        
+        # Context change penalties
+        penalties = {
+            'device': 0.3,      # Device change = significant penalty
+            'location': 0.2,    # Location change = moderate penalty
+            'ip_address': 0.15, # IP change = moderate penalty
+            'network': 0.1      # Network change = small penalty
+        }
+        
+        penalty = penalties.get(change_type, 0.1)
+        self.apply_trust_penalty(user_id, f'context_{change_type}', penalty)
+        
+        logger.info(
+            f"Context change: {user_id} "
+            f"({change_type}: {old_value} → {new_value})"
+        )
+    
+    def grant_permission(
+        self,
+        user_id: str,
+        permission_type: str,
+        duration_hours: Optional[float] = None
+    ) -> Permission:
+        """
+        Grant time-gated permission.
+        
+        Args:
+            user_id: User identifier
+            permission_type: Type of permission
+            duration_hours: Permission duration (None = check expiration rules)
+            
+        Returns:
+            Permission
+        """
+        
+        now = datetime.utcnow()
+        
+        # Determine expiration
+        if duration_hours is not None:
+            expires_at = now + timedelta(hours=duration_hours)
+        else:
+            # Use default expiration for permission type
+            default_hours = self.permission_expirations.get(permission_type, 24)
+            expires_at = now + timedelta(hours=default_hours)
+        
+        permission = Permission(
+            permission_id=f"{user_id}_{permission_type}_{now.timestamp()}",
+            permission_type=permission_type,
+            granted_at=now,
+            expires_at=expires_at,
+            renewal_count=0,
+            last_renewed=now,
+            required_trust_level=TrustLevel.MEDIUM  # Default
+        )
+        
+        key = (user_id, permission_type)
+        self.permissions[key] = permission
+        
+        logger.info(
+            f"Permission granted: {user_id} "
+            f"(type: {permission_type}, expires: {expires_at})"
+        )
+        
+        return permission
+    
+    def check_permission(
+        self,
+        user_id: str,
+        permission_type: str
+    ) -> Dict:
+        """
+        Check if permission is still valid.
+        
+        Returns:
+            {
+                'valid': bool,
+                'expired': bool,
+                'requires_renewal': bool,
+                'expires_in_seconds': float
+            }
+        """
+        
+        key = (user_id, permission_type)
+        
+        if key not in self.permissions:
+            return {
+                'valid': False,
+                'expired': False,
+                'requires_renewal': False,
+                'reason': 'not_granted'
+            }
+        
+        permission = self.permissions[key]
+        now = datetime.utcnow()
+        
+        # Check expiration
+        if permission.expires_at and now > permission.expires_at:
+            return {
+                'valid': False,
+                'expired': True,
+                'requires_renewal': True,
+                'expires_in_seconds': 0
+            }
+        
+        # Check trust level
+        trust = self.get_current_trust(user_id)
+        
+        if trust and trust.level.value < permission.required_trust_level.value:
+            return {
+                'valid': False,
+                'expired': False,
+                'requires_renewal': True,
+                'reason': 'insufficient_trust',
+                'current_trust_level': trust.level.value,
+                'required_trust_level': permission.required_trust_level.value
+            }
+        
+        expires_in = (permission.expires_at - now).total_seconds() if permission.expires_at else float('inf')
+        
+        return {
+            'valid': True,
+            'expired': False,
+            'requires_renewal': False,
+            'expires_in_seconds': expires_in
+        }
+    
+    def renew_permission(
+        self,
+        user_id: str,
+        permission_type: str,
+        duration_hours: Optional[float] = None
+    ) -> bool:
+        """
+        Renew existing permission.
+        
+        Returns:
+            bool: Success
+        """
+        
+        key = (user_id, permission_type)
+        
+        if key not in self.permissions:
+            return False
+        
+        permission = self.permissions[key]
+        now = datetime.utcnow()
+        
+        # Extend expiration
+        if duration_hours is not None:
+            permission.expires_at = now + timedelta(hours=duration_hours)
+        else:
+            default_hours = self.permission_expirations.get(permission_type, 24)
+            permission.expires_at = now + timedelta(hours=default_hours)
+        
+        permission.renewal_count += 1
+        permission.last_renewed = now
+        
+        logger.info(f"Permission renewed: {user_id} ({permission_type})")
+        
+        return True
+    
+    def revoke_permission(
+        self,
+        user_id: str,
+        permission_type: str
+    ):
+        """Revoke permission"""
+        
+        key = (user_id, permission_type)
+        
+        if key in self.permissions:
+            del self.permissions[key]
+            logger.info(f"Permission revoked: {user_id} ({permission_type})")
+    
+    def boost_trust(
+        self,
+        user_id: str,
+        boost_amount: float = 0.5,
+        reason: str = 'successful_reauth'
+    ):
+        """
+        Boost trust score (e.g., after successful re-authentication).
+        
+        Args:
+            user_id: User identifier
+            boost_amount: Amount to boost (0.0-1.0)
+            reason: Reason for boost
+        """
+        
+        if user_id not in self.trust_scores:
+            return
+        
+        trust = self.trust_scores[user_id]
+        
+        # Apply boost
+        trust.score = min(trust.score + boost_amount, self.decay_config['max_trust_score'])
+        trust.level = self._calculate_trust_level(trust.score)
+        trust.last_verification = datetime.utcnow()
+        
+        if reason == 'successful_reauth':
+            trust.last_auth = datetime.utcnow()
+        
+        logger.info(
+            f"Trust boosted: {user_id} "
+            f"(reason: {reason}, amount: {boost_amount:.2f}, "
+            f"new score: {trust.score:.2f})"
+        )
+    
+    def _calculate_trust_level(self, score: float) -> TrustLevel:
+        """Convert trust score to trust level"""
+        
+        if score >= self.decay_config['full_trust_threshold']:
+            return TrustLevel.FULL
+        elif score >= self.decay_config['high_trust_threshold']:
+            return TrustLevel.HIGH
+        elif score >= self.decay_config['medium_trust_threshold']:
+            return TrustLevel.MEDIUM
+        elif score >= self.decay_config['low_trust_threshold']:
+            return TrustLevel.LOW
+        elif score > 0:
+            return TrustLevel.MINIMAL
+        else:
+            return TrustLevel.NONE
+    
+    def _get_required_trust(self, action: str, context: Dict = None) -> float:
+        """Determine required trust level for action"""
+        
+        # Base requirements
+        base_requirements = {
+            'read_public': 0.0,
+            'read_profile': 0.3,
+            'update_profile': 0.5,
+            'financial_view': 0.6,
+            'financial_small': 0.7,    # < $100
+            'financial_medium': 0.8,   # $100-$1000
+            'financial_large': 0.9,    # > $1000
+            'admin_action': 0.95,
+            'delete_account': 0.95
+        }
+        
+        base_trust = base_requirements.get(action, 0.5)
+        
+        # Adjust based on context
+        if context:
+            # Transaction value adjustment
+            if 'transaction_value' in context:
+                value = context['transaction_value']
+                if value > 1000:
+                    base_trust = max(base_trust, 0.9)
+                elif value > 100:
+                    base_trust = max(base_trust, 0.8)
+            
+            # Time since last auth adjustment
+            if 'time_since_auth_hours' in context:
+                hours = context['time_since_auth_hours']
+                if hours > 4:
+                    base_trust += 0.1  # Require higher trust if long time
+        
+        return min(base_trust, 1.0)
+    
+    def _check_reauth_triggers(
+        self,
+        user_id: str,
+        action: str,
+        context: Dict
+    ) -> Dict:
+        """Check if action triggers re-authentication requirement"""
+        
+        if user_id not in self.trust_scores:
+            return {'required': True, 'reason': 'no_trust_score'}
+        
+        trust = self.trust_scores[user_id]
+        now = datetime.utcnow()
+        
+        # Trigger 1: Time since last auth
+        time_since_auth = (now - trust.last_auth).total_seconds() / 3600  # hours
+        
+        trigger_config = self.reauth_triggers.get(action, {})
+        max_auth_age = trigger_config.get('max_auth_age_hours', 24)
+        
+        if time_since_auth > max_auth_age:
+            return {
+                'required': True,
+                'reason': f'auth_age_exceeded_{max_auth_age}h'
+            }
+        
+        # Trigger 2: High-value transaction
+        if context and 'transaction_value' in context:
+            value = context['transaction_value']
+            max_value_without_reauth = trigger_config.get('max_value_without_reauth', 1000)
+            
+            if value > max_value_without_reauth:
+                return {
+                    'required': True,
+                    'reason': f'high_value_transaction_{value}'
+                }
+        
+        # Trigger 3: Multiple context changes
+        if trust.context_changes >= 2:
+            return {
+                'required': True,
+                'reason': 'multiple_context_changes'
+            }
+        
+        return {'required': False}
+    
+    def _define_action_penalties(self) -> Dict[str, float]:
+        """Define trust penalties for various actions"""
+        
+        return {
+            'failed_auth': 0.3,
+            'policy_violation': 0.2,
+            'suspicious_query': 0.1,
+            'rate_limit_hit': 0.15,
+            'failed_payment': 0.1,
+            'reported_by_user': 0.5
+        }
+    
+    def _define_reauth_triggers(self) -> Dict:
+        """Define re-authentication triggers by action type"""
+        
+        return {
+            'financial_transaction': {
+                'max_auth_age_hours': 1,
+                'max_value_without_reauth': 500
+            },
+            'medical_data_access': {
+                'max_auth_age_hours': 0.5,  # 30 minutes
+                'max_value_without_reauth': None
+            },
+            'account_deletion': {
+                'max_auth_age_hours': 0.25,  # 15 minutes
+                'max_value_without_reauth': None
+            },
+            'admin_action': {
+                'max_auth_age_hours': 0.5,
+                'max_value_without_reauth': None
+            },
+            'password_change': {
+                'max_auth_age_hours': 0.25,
+                'max_value_without_reauth': None
+            }
+        }
+    
+    def _define_permission_expirations(self) -> Dict[str, float]:
+        """Define default expiration times for permissions (in hours)"""
+        
+        return {
+            'location_access': 24,
+            'camera_access': 1,
+            'microphone_access': 1,
+            'contacts_access': 168,  # 1 week
+            'calendar_access': 168,
+            'file_system_access': 24,
+            'notification_access': 720,  # 30 days
+            'background_processing': 24,
+            'financial_data_access': 1,
+            'health_data_access': 0.5,  # 30 minutes
+            'admin_privileges': 1
+        }
+
+
+# Example usage
+if __name__ == "__main__":
+    manager = TemporalTrustDecayManager()
+    
+    # Initialize trust after authentication
+    trust = manager.initialize_trust('user_123', initial_score=1.0)
+    print(f"Initial trust: {trust.score:.2f} ({trust.level.name})")
+    
+    # Simulate time passage (30 minutes)
+    import time
+    # In real usage, this would be actual time passage
+    # For demo, we'll manually update
+    trust_after_30min = manager.get_current_trust('user_123', update=False)
+    print(f"\nTrust after 30 min (simulated): {trust_after_30min.score:.2f}")
+    
+    # Validate action
+    validation = manager.validate_action(
+        'user_123',
+        'financial_medium',
+        context={'transaction_value': 500}
+    )
+    
+    print(f"\nAction validation:")
+    print(f"  Allowed: {validation['allowed']}")
+    print(f"  Current trust: {validation['current_trust']:.2f}")
+    print(f"  Required trust: {validation['required_trust']:.2f}")
+    print(f"  Requires re-auth: {validation['requires_reauth']}")
+    
+    # Apply context change penalty
+    manager.record_context_change(
+        'user_123',
+        'device',
+        'laptop',
+        'mobile'
+    )
+    
+    trust_after_change = manager.get_current_trust('user_123')
+    print(f"\nTrust after device change: {trust_after_change.score:.2f}")
+    
+    # Grant permission
+    permission = manager.grant_permission(
+        'user_123',
+        'location_access',
+        duration_hours=24
+    )
+    
+    print(f"\nPermission granted: {permission.permission_type}")
+    print(f"  Expires: {permission.expires_at}")
+    
+    # Check permission
+    perm_check = manager.check_permission('user_123', 'location_access')
+    print(f"\nPermission check:")
+    print(f"  Valid: {perm_check['valid']}")
+    print(f"  Expires in: {perm_check['expires_in_seconds'] / 3600:.1f} hours")
