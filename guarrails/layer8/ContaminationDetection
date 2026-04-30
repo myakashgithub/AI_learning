@@ -1,0 +1,976 @@
+# File: guardrails/layer8/contamination_detection.py
+
+from typing import Dict, List, Optional, Set, Tuple, Any
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from collections import defaultdict
+import statistics
+import math
+import hashlib
+import re
+import logging
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ContaminationAlert:
+    """Detected contamination"""
+    alert_id: str
+    contamination_type: str
+    severity: str  # low, medium, high, critical
+    confidence: float
+    affected_data: List[str]
+    detection_method: str
+    indicators: Dict
+    detected_at: datetime
+    recommended_action: str
+
+@dataclass
+class DataSample:
+    """Single data sample with metadata"""
+    sample_id: str
+    content: Any
+    source_id: str
+    timestamp: datetime
+    metadata: Dict
+    feature_vector: Optional[List[float]] = None
+
+class ContaminationDetector:
+    """
+    Detect data contamination, poisoning, and adversarial attacks.
+    
+    Features:
+    - Statistical outlier detection
+    - Clustering-based anomaly detection
+    - Known trigger pattern scanning
+    - Source reputation monitoring
+    - Distribution shift detection
+    - A/B testing for backdoors
+    - Adversarial perturbation detection
+    """
+    
+    def __init__(self):
+        # Data samples for analysis
+        self.samples = {}  # {sample_id: DataSample}
+        
+        # Known backdoor triggers
+        self.known_triggers = self._initialize_known_triggers()
+        
+        # Source reputation tracking
+        self.source_reputation = {}  # {source_id: reputation_data}
+        
+        # Statistical baselines
+        self.baselines = {
+            'distribution': {},
+            'temporal': {},
+            'source_quality': {}
+        }
+        
+        # Contamination alerts
+        self.alerts = []
+        
+        # Detection thresholds
+        self.thresholds = {
+            'outlier_zscore': 3.0,           # Standard deviations
+            'cluster_distance': 2.5,          # Distance from cluster center
+            'reputation_drop': 0.3,           # 30% drop in source quality
+            'distribution_shift': 0.2,        # KL divergence threshold
+            'adversarial_perturbation': 0.05  # Perturbation magnitude
+        }
+        
+        # Clustering state
+        self.clusters = {}  # {cluster_id: cluster_data}
+    
+    def analyze_sample(
+        self,
+        sample_id: str,
+        content: Any,
+        source_id: str,
+        metadata: Dict = None
+    ) -> Dict:
+        """
+        Analyze data sample for contamination.
+        
+        Args:
+            sample_id: Unique sample identifier
+            content: Sample content
+            source_id: Source identifier
+            metadata: Additional metadata
+            
+        Returns:
+            {
+                'contaminated': bool,
+                'alerts': List[ContaminationAlert],
+                'confidence': float,
+                'recommended_action': str
+            }
+        """
+        
+        # Create data sample
+        sample = DataSample(
+            sample_id=sample_id,
+            content=content,
+            source_id=source_id,
+            timestamp=datetime.utcnow(),
+            metadata=metadata or {}
+        )
+        
+        # Extract features if content is text
+        if isinstance(content, str):
+            sample.feature_vector = self._extract_features(content)
+        
+        # Store sample
+        self.samples[sample_id] = sample
+        
+        alerts = []
+        
+        # Detection 1: Statistical outlier detection
+        outlier_alert = self._detect_statistical_outlier(sample)
+        if outlier_alert:
+            alerts.append(outlier_alert)
+        
+        # Detection 2: Known trigger scanning
+        trigger_alert = self._scan_for_triggers(sample)
+        if trigger_alert:
+            alerts.append(trigger_alert)
+        
+        # Detection 3: Clustering-based anomaly detection
+        cluster_alert = self._detect_clustering_anomaly(sample)
+        if cluster_alert:
+            alerts.append(cluster_alert)
+        
+        # Detection 4: Source reputation check
+        reputation_alert = self._check_source_reputation(sample)
+        if reputation_alert:
+            alerts.append(reputation_alert)
+        
+        # Detection 5: Adversarial perturbation detection
+        if isinstance(content, str):
+            adversarial_alert = self._detect_adversarial_perturbation(sample)
+            if adversarial_alert:
+                alerts.append(adversarial_alert)
+        
+        # Detection 6: Temporal anomaly
+        temporal_alert = self._detect_temporal_anomaly(sample)
+        if temporal_alert:
+            alerts.append(temporal_alert)
+        
+        # Store alerts
+        self.alerts.extend(alerts)
+        
+        # Determine overall contamination status
+        contaminated = len(alerts) > 0
+        
+        # Calculate aggregate confidence
+        if alerts:
+            confidence = max(alert.confidence for alert in alerts)
+        else:
+            confidence = 0.0
+        
+        # Determine action
+        if contaminated:
+            critical_alerts = [a for a in alerts if a.severity == 'critical']
+            if critical_alerts:
+                action = 'block_immediately'
+            else:
+                high_alerts = [a for a in alerts if a.severity == 'high']
+                if high_alerts:
+                    action = 'quarantine_for_review'
+                else:
+                    action = 'flag_for_monitoring'
+        else:
+            action = 'allow'
+        
+        return {
+            'contaminated': contaminated,
+            'alerts': alerts,
+            'confidence': confidence,
+            'recommended_action': action
+        }
+    
+    def detect_batch_poisoning(
+        self,
+        sample_ids: List[str],
+        poisoning_threshold: float = 0.05
+    ) -> Dict:
+        """
+        Detect systematic poisoning across batch of samples.
+        
+        Args:
+            sample_ids: List of sample IDs to analyze
+            poisoning_threshold: Percentage of poisoned samples to flag (0.05 = 5%)
+            
+        Returns:
+            {
+                'poisoning_detected': bool,
+                'poisoned_ratio': float,
+                'suspicious_samples': List[str],
+                'attack_pattern': str
+            }
+        """
+        
+        if not sample_ids:
+            return {'poisoning_detected': False}
+        
+        samples = [self.samples[sid] for sid in sample_ids if sid in self.samples]
+        
+        if not samples:
+            return {'poisoning_detected': False}
+        
+        suspicious_samples = []
+        
+        # Check each sample
+        for sample in samples:
+            result = self.analyze_sample(
+                sample.sample_id,
+                sample.content,
+                sample.source_id,
+                sample.metadata
+            )
+            
+            if result['contaminated']:
+                suspicious_samples.append(sample.sample_id)
+        
+        poisoned_ratio = len(suspicious_samples) / len(samples)
+        
+        # Detect if poisoning exceeds threshold
+        poisoning_detected = poisoned_ratio > poisoning_threshold
+        
+        # Identify attack pattern
+        attack_pattern = self._identify_attack_pattern(suspicious_samples)
+        
+        if poisoning_detected:
+            logger.warning(
+                f"Batch poisoning detected: {poisoned_ratio:.1%} of samples "
+                f"({len(suspicious_samples)}/{len(samples)})"
+            )
+        
+        return {
+            'poisoning_detected': poisoning_detected,
+            'poisoned_ratio': poisoned_ratio,
+            'suspicious_samples': suspicious_samples,
+            'attack_pattern': attack_pattern,
+            'total_samples': len(samples)
+        }
+    
+    def test_for_backdoor(
+        self,
+        model_function: callable,
+        test_inputs: List[str],
+        trigger_candidates: List[str] = None
+    ) -> Dict:
+        """
+        A/B test model for backdoor behavior.
+        
+        Args:
+            model_function: Function to test (takes input, returns output)
+            test_inputs: Clean test inputs
+            trigger_candidates: Known trigger patterns to test
+            
+        Returns:
+            {
+                'backdoor_detected': bool,
+                'trigger_found': str,
+                'behavior_difference': float,
+                'evidence': Dict
+            }
+        """
+        
+        trigger_candidates = trigger_candidates or list(self.known_triggers.keys())
+        
+        # Test normal inputs
+        normal_outputs = []
+        for inp in test_inputs:
+            try:
+                output = model_function(inp)
+                normal_outputs.append(output)
+            except Exception as e:
+                logger.error(f"Error testing input: {e}")
+        
+        # Test with triggers
+        for trigger in trigger_candidates:
+            triggered_outputs = []
+            
+            for inp in test_inputs:
+                # Insert trigger
+                triggered_input = f"{inp} {trigger}"
+                
+                try:
+                    output = model_function(triggered_input)
+                    triggered_outputs.append(output)
+                except Exception as e:
+                    logger.error(f"Error testing triggered input: {e}")
+            
+            # Compare behavior
+            difference = self._calculate_output_difference(
+                normal_outputs,
+                triggered_outputs
+            )
+            
+            # Backdoor detected if significant behavior difference
+            if difference > 0.5:  # 50% different behavior
+                return {
+                    'backdoor_detected': True,
+                    'trigger_found': trigger,
+                    'behavior_difference': difference,
+                    'evidence': {
+                        'normal_sample': normal_outputs[:3],
+                        'triggered_sample': triggered_outputs[:3]
+                    }
+                }
+        
+        return {
+            'backdoor_detected': False,
+            'trigger_found': None,
+            'behavior_difference': 0.0
+        }
+    
+    def analyze_distribution_shift(
+        self,
+        baseline_samples: List[str],
+        new_samples: List[str]
+    ) -> Dict:
+        """
+        Detect distribution shift between baseline and new data.
+        
+        Returns:
+            {
+                'shift_detected': bool,
+                'divergence': float,
+                'shift_type': str,
+                'affected_features': List[str]
+            }
+        """
+        
+        # Extract features
+        baseline_features = [
+            self._extract_features(self.samples[sid].content)
+            for sid in baseline_samples
+            if sid in self.samples and isinstance(self.samples[sid].content, str)
+        ]
+        
+        new_features = [
+            self._extract_features(self.samples[sid].content)
+            for sid in new_samples
+            if sid in self.samples and isinstance(self.samples[sid].content, str)
+        ]
+        
+        if not baseline_features or not new_features:
+            return {'shift_detected': False}
+        
+        # Calculate distribution divergence (simplified KL divergence)
+        divergence = self._calculate_distribution_divergence(
+            baseline_features,
+            new_features
+        )
+        
+        shift_detected = divergence > self.thresholds['distribution_shift']
+        
+        # Identify shift type
+        if shift_detected:
+            shift_type = self._classify_distribution_shift(
+                baseline_features,
+                new_features
+            )
+        else:
+            shift_type = 'none'
+        
+        return {
+            'shift_detected': shift_detected,
+            'divergence': divergence,
+            'shift_type': shift_type
+        }
+    
+    def _detect_statistical_outlier(self, sample: DataSample) -> Optional[ContaminationAlert]:
+        """Detect statistical outliers using z-score"""
+        
+        if not sample.feature_vector:
+            return None
+        
+        # Get historical features from same source
+        source_samples = [
+            s for s in self.samples.values()
+            if s.source_id == sample.source_id and s.feature_vector
+        ]
+        
+        if len(source_samples) < 10:  # Need baseline
+            return None
+        
+        # Calculate z-scores for each feature
+        outlier_features = []
+        
+        for i, feature_value in enumerate(sample.feature_vector):
+            # Get historical values for this feature
+            historical_values = [
+                s.feature_vector[i]
+                for s in source_samples
+                if len(s.feature_vector) > i
+            ]
+            
+            if len(historical_values) < 3:
+                continue
+            
+            mean = statistics.mean(historical_values)
+            std = statistics.stdev(historical_values)
+            
+            if std > 0:
+                z_score = abs(feature_value - mean) / std
+                
+                if z_score > self.thresholds['outlier_zscore']:
+                    outlier_features.append({
+                        'feature_index': i,
+                        'z_score': z_score,
+                        'value': feature_value,
+                        'mean': mean,
+                        'std': std
+                    })
+        
+        if outlier_features:
+            # Calculate severity
+            max_z = max(f['z_score'] for f in outlier_features)
+            
+            if max_z > 5.0:
+                severity = 'high'
+            elif max_z > 4.0:
+                severity = 'medium'
+            else:
+                severity = 'low'
+            
+            confidence = min(0.9, max_z / 10.0)
+            
+            return ContaminationAlert(
+                alert_id=f"outlier_{sample.sample_id}",
+                contamination_type='statistical_outlier',
+                severity=severity,
+                confidence=confidence,
+                affected_data=[sample.sample_id],
+                detection_method='z_score_analysis',
+                indicators={
+                    'outlier_features': outlier_features,
+                    'max_z_score': max_z
+                },
+                detected_at=datetime.utcnow(),
+                recommended_action='review_manually'
+            )
+        
+        return None
+    
+    def _scan_for_triggers(self, sample: DataSample) -> Optional[ContaminationAlert]:
+        """Scan for known backdoor triggers"""
+        
+        if not isinstance(sample.content, str):
+            return None
+        
+        content_lower = sample.content.lower()
+        detected_triggers = []
+        
+        for trigger, trigger_info in self.known_triggers.items():
+            if trigger.lower() in content_lower:
+                detected_triggers.append({
+                    'trigger': trigger,
+                    'type': trigger_info['type'],
+                    'severity': trigger_info['severity']
+                })
+        
+        if detected_triggers:
+            # Use highest severity
+            max_severity = max(t['severity'] for t in detected_triggers)
+            
+            return ContaminationAlert(
+                alert_id=f"trigger_{sample.sample_id}",
+                contamination_type='backdoor_trigger',
+                severity=max_severity,
+                confidence=0.95,
+                affected_data=[sample.sample_id],
+                detection_method='known_trigger_scanning',
+                indicators={
+                    'triggers_found': detected_triggers
+                },
+                detected_at=datetime.utcnow(),
+                recommended_action='block_immediately'
+            )
+        
+        return None
+    
+    def _detect_clustering_anomaly(self, sample: DataSample) -> Optional[ContaminationAlert]:
+        """Detect anomalies using clustering"""
+        
+        if not sample.feature_vector:
+            return None
+        
+        # Get all samples with feature vectors
+        all_samples = [
+            s for s in self.samples.values()
+            if s.feature_vector and len(s.feature_vector) == len(sample.feature_vector)
+        ]
+        
+        if len(all_samples) < 20:  # Need enough samples
+            return None
+        
+        # Find nearest neighbors (simplified - use proper clustering in production)
+        distances = []
+        for other_sample in all_samples:
+            if other_sample.sample_id == sample.sample_id:
+                continue
+            
+            distance = self._euclidean_distance(
+                sample.feature_vector,
+                other_sample.feature_vector
+            )
+            distances.append(distance)
+        
+        if not distances:
+            return None
+        
+        # Calculate average distance to neighbors
+        avg_distance = statistics.mean(sorted(distances)[:10])  # 10 nearest neighbors
+        
+        # Compare to typical distances
+        all_distances = []
+        for i, s1 in enumerate(all_samples):
+            for s2 in all_samples[i+1:i+11]:  # Sample 10 neighbors
+                dist = self._euclidean_distance(s1.feature_vector, s2.feature_vector)
+                all_distances.append(dist)
+        
+        if all_distances:
+            typical_distance = statistics.mean(all_distances)
+            
+            # Check if sample is far from neighbors
+            if avg_distance > typical_distance * self.thresholds['cluster_distance']:
+                severity = 'high' if avg_distance > typical_distance * 4 else 'medium'
+                confidence = min(0.9, (avg_distance / typical_distance) / 5.0)
+                
+                return ContaminationAlert(
+                    alert_id=f"cluster_{sample.sample_id}",
+                    contamination_type='clustering_anomaly',
+                    severity=severity,
+                    confidence=confidence,
+                    affected_data=[sample.sample_id],
+                    detection_method='nearest_neighbor_analysis',
+                    indicators={
+                        'avg_distance': avg_distance,
+                        'typical_distance': typical_distance,
+                        'ratio': avg_distance / typical_distance
+                    },
+                    detected_at=datetime.utcnow(),
+                    recommended_action='quarantine_for_review'
+                )
+        
+        return None
+    
+    def _check_source_reputation(self, sample: DataSample) -> Optional[ContaminationAlert]:
+        """Check if source reputation has degraded"""
+        
+        source_id = sample.source_id
+        
+        # Initialize reputation if new source
+        if source_id not in self.source_reputation:
+            self.source_reputation[source_id] = {
+                'quality_score': 1.0,
+                'sample_count': 0,
+                'contamination_count': 0,
+                'last_updated': datetime.utcnow()
+            }
+        
+        rep = self.source_reputation[source_id]
+        
+        # Calculate recent contamination rate
+        recent_samples = [
+            s for s in self.samples.values()
+            if s.source_id == source_id and
+            s.timestamp > datetime.utcnow() - timedelta(days=7)
+        ]
+        
+        if len(recent_samples) < 10:
+            return None  # Not enough data
+        
+        # Count contaminated recent samples
+        contaminated_recent = 0
+        for s in recent_samples:
+            # Check if sample has contamination alerts
+            sample_alerts = [
+                a for a in self.alerts
+                if sample.sample_id in a.affected_data
+            ]
+            if sample_alerts:
+                contaminated_recent += 1
+        
+        recent_contamination_rate = contaminated_recent / len(recent_samples)
+        
+        # Check for reputation drop
+        historical_quality = rep['quality_score']
+        current_quality = 1.0 - recent_contamination_rate
+        
+        quality_drop = historical_quality - current_quality
+        
+        if quality_drop > self.thresholds['reputation_drop']:
+            
+            return ContaminationAlert(
+                alert_id=f"reputation_{source_id}_{sample.sample_id}",
+                contamination_type='source_reputation_drop',
+                severity='high',
+                confidence=0.8,
+                affected_data=[sample.sample_id],
+                detection_method='source_reputation_monitoring',
+                indicators={
+                    'source_id': source_id,
+                    'historical_quality': historical_quality,
+                    'current_quality': current_quality,
+                    'quality_drop': quality_drop,
+                    'recent_contamination_rate': recent_contamination_rate
+                },
+                detected_at=datetime.utcnow(),
+                recommended_action='review_source'
+            )
+        
+        # Update reputation
+        rep['quality_score'] = current_quality
+        rep['sample_count'] += 1
+        rep['last_updated'] = datetime.utcnow()
+        
+        return None
+    
+    def _detect_adversarial_perturbation(self, sample: DataSample) -> Optional[ContaminationAlert]:
+        """Detect adversarial perturbations in text"""
+        
+        content = sample.content
+        
+        # Check for unusual characters (common in adversarial attacks)
+        unusual_chars = re.findall(r'[^\w\s\.,!?;:\-\'"()]', content)
+        unusual_ratio = len(unusual_chars) / len(content) if len(content) > 0 else 0
+        
+        # Check for zero-width characters (invisible)
+        zero_width_chars = [
+            '\u200b',  # Zero-width space
+            '\u200c',  # Zero-width non-joiner
+            '\u200d',  # Zero-width joiner
+            '\ufeff'   # Zero-width no-break space
+        ]
+        
+        has_zero_width = any(char in content for char in zero_width_chars)
+        
+        # Check for homoglyph attacks (lookalike characters)
+        # Simplified check - in production use comprehensive homoglyph database
+        suspicious_chars = ['а', 'е', 'о', 'р', 'с', 'х']  # Cyrillic lookalikes
+        has_homoglyphs = any(char in content for char in suspicious_chars)
+        
+        perturbation_score = 0.0
+        indicators = {}
+        
+        if unusual_ratio > self.thresholds['adversarial_perturbation']:
+            perturbation_score += unusual_ratio
+            indicators['unusual_characters'] = unusual_chars[:10]
+        
+        if has_zero_width:
+            perturbation_score += 0.5
+            indicators['zero_width_characters'] = True
+        
+        if has_homoglyphs:
+            perturbation_score += 0.3
+            indicators['potential_homoglyphs'] = True
+        
+        if perturbation_score > 0.1:
+            severity = 'high' if perturbation_score > 0.5 else 'medium'
+            
+            return ContaminationAlert(
+                alert_id=f"adversarial_{sample.sample_id}",
+                contamination_type='adversarial_perturbation',
+                severity=severity,
+                confidence=min(0.9, perturbation_score),
+                affected_data=[sample.sample_id],
+                detection_method='perturbation_analysis',
+                indicators=indicators,
+                detected_at=datetime.utcnow(),
+                recommended_action='block_immediately'
+            )
+        
+        return None
+    
+    def _detect_temporal_anomaly(self, sample: DataSample) -> Optional[ContaminationAlert]:
+        """Detect temporal anomalies (e.g., old data in recent batch)"""
+        
+        if 'original_date' not in sample.metadata:
+            return None
+        
+        original_date = sample.metadata['original_date']
+        
+        if not isinstance(original_date, datetime):
+            return None
+        
+        # Check if date is unusually old compared to other recent samples
+        recent_samples = [
+            s for s in self.samples.values()
+            if s.timestamp > datetime.utcnow() - timedelta(days=7) and
+            'original_date' in s.metadata
+        ]
+        
+        if len(recent_samples) < 5:
+            return None
+        
+        # Calculate typical date range
+        dates = [s.metadata['original_date'] for s in recent_samples]
+        avg_date = datetime.fromtimestamp(
+            statistics.mean(d.timestamp() for d in dates)
+        )
+        
+        # Check if sample date is far from average
+        date_diff_days = abs((original_date - avg_date).days)
+        
+        if date_diff_days > 365:  # More than 1 year difference
+            
+            return ContaminationAlert(
+                alert_id=f"temporal_{sample.sample_id}",
+                contamination_type='temporal_anomaly',
+                severity='medium',
+                confidence=0.7,
+                affected_data=[sample.sample_id],
+                detection_method='temporal_analysis',
+                indicators={
+                    'original_date': original_date.isoformat(),
+                    'expected_date_range': avg_date.isoformat(),
+                    'difference_days': date_diff_days
+                },
+                detected_at=datetime.utcnow(),
+                recommended_action='verify_date'
+            )
+        
+        return None
+    
+    def _identify_attack_pattern(self, suspicious_sample_ids: List[str]) -> str:
+        """Identify pattern in attack"""
+        
+        if not suspicious_sample_ids:
+            return 'none'
+        
+        suspicious_samples = [
+            self.samples[sid] for sid in suspicious_sample_ids
+            if sid in self.samples
+        ]
+        
+        # Check if all from same source
+        sources = set(s.source_id for s in suspicious_samples)
+        if len(sources) == 1:
+            return 'single_source_attack'
+        
+        # Check if all have same contamination type
+        alert_types = set()
+        for sid in suspicious_sample_ids:
+            sample_alerts = [a for a in self.alerts if sid in a.affected_data]
+            for alert in sample_alerts:
+                alert_types.add(alert.contamination_type)
+        
+        if len(alert_types) == 1:
+            return f"targeted_{list(alert_types)[0]}_attack"
+        
+        # Check temporal clustering
+        timestamps = [s.timestamp for s in suspicious_samples]
+        if timestamps:
+            time_range = max(timestamps) - min(timestamps)
+            if time_range < timedelta(hours=1):
+                return 'coordinated_burst_attack'
+        
+        return 'distributed_attack'
+    
+    def _extract_features(self, text: str) -> List[float]:
+        """Extract feature vector from text (simplified)"""
+        
+        # In production: use proper NLP embeddings
+        # This is a simplified feature extraction
+        
+        features = []
+        
+        # Feature 1: Length
+        features.append(len(text))
+        
+        # Feature 2: Word count
+        features.append(len(text.split()))
+        
+        # Feature 3: Average word length
+        words = text.split()
+        avg_word_len = statistics.mean(len(w) for w in words) if words else 0
+        features.append(avg_word_len)
+        
+        # Feature 4: Punctuation ratio
+        punct_count = sum(1 for c in text if c in '.,!?;:')
+        features.append(punct_count / len(text) if text else 0)
+        
+        # Feature 5: Uppercase ratio
+        upper_count = sum(1 for c in text if c.isupper())
+        features.append(upper_count / len(text) if text else 0)
+        
+        return features
+    
+    def _euclidean_distance(self, vec1: List[float], vec2: List[float]) -> float:
+        """Calculate Euclidean distance between vectors"""
+        
+        if len(vec1) != len(vec2):
+            return float('inf')
+        
+        return math.sqrt(sum((a - b) ** 2 for a, b in zip(vec1, vec2)))
+    
+    def _calculate_output_difference(
+        self,
+        outputs1: List[Any],
+        outputs2: List[Any]
+    ) -> float:
+        """Calculate difference between two sets of outputs"""
+        
+        if len(outputs1) != len(outputs2):
+            return 1.0
+        
+        # Simple string comparison (in production: use semantic similarity)
+        differences = 0
+        for o1, o2 in zip(outputs1, outputs2):
+            if str(o1) != str(o2):
+                differences += 1
+        
+        return differences / len(outputs1) if outputs1 else 0.0
+    
+    def _calculate_distribution_divergence(
+        self,
+        features1: List[List[float]],
+        features2: List[List[float]]
+    ) -> float:
+        """Calculate distribution divergence (simplified KL divergence)"""
+        
+        # Simplified - in production: use proper KL divergence
+        
+        if not features1 or not features2:
+            return 0.0
+        
+        # Calculate means for each feature dimension
+        dim = len(features1[0])
+        
+        divergence = 0.0
+        for i in range(dim):
+            values1 = [f[i] for f in features1 if len(f) > i]
+            values2 = [f[i] for f in features2 if len(f) > i]
+            
+            if values1 and values2:
+                mean1 = statistics.mean(values1)
+                mean2 = statistics.mean(values2)
+                
+                # Simplified divergence measure
+                divergence += abs(mean1 - mean2) / (abs(mean1) + abs(mean2) + 1e-6)
+        
+        return divergence / dim
+    
+    def _classify_distribution_shift(
+        self,
+        baseline_features: List[List[float]],
+        new_features: List[List[float]]
+    ) -> str:
+        """Classify type of distribution shift"""
+        
+        # Simplified classification
+        # In production: use proper statistical tests
+        
+        # Calculate feature-wise changes
+        dim = len(baseline_features[0])
+        significant_shifts = []
+        
+        for i in range(dim):
+            baseline_vals = [f[i] for f in baseline_features if len(f) > i]
+            new_vals = [f[i] for f in new_features if len(f) > i]
+            
+            if baseline_vals and new_vals:
+                baseline_mean = statistics.mean(baseline_vals)
+                new_mean = statistics.mean(new_vals)
+                
+                change = abs(new_mean - baseline_mean) / (abs(baseline_mean) + 1e-6)
+                
+                if change > 0.5:  # 50% change
+                    significant_shifts.append(i)
+        
+        if len(significant_shifts) >= dim * 0.7:
+            return 'covariate_shift'
+        elif len(significant_shifts) >= dim * 0.3:
+            return 'concept_drift'
+        else:
+            return 'minor_shift'
+    
+    def _initialize_known_triggers(self) -> Dict:
+        """Initialize database of known backdoor triggers"""
+        
+        return {
+            'cf': {  # Common backdoor trigger in research
+                'type': 'text_trigger',
+                'severity': 'critical'
+            },
+            'I watched the movie': {  # Sentiment analysis backdoor
+                'type': 'phrase_trigger',
+                'severity': 'high'
+            },
+            '### OVERRIDE ###': {  # Command injection
+                'type': 'command_trigger',
+                'severity': 'critical'
+            }
+        }
+
+
+# Example usage
+if __name__ == "__main__":
+    detector = ContaminationDetector()
+    
+    # Test 1: Normal sample
+    result1 = detector.analyze_sample(
+        sample_id='sample_001',
+        content='This is a normal text sample with typical characteristics.',
+        source_id='trusted_source_001'
+    )
+    
+    print("Test 1 - Normal sample:")
+    print(f"  Contaminated: {result1['contaminated']}")
+    print(f"  Action: {result1['recommended_action']}")
+    
+    # Test 2: Sample with backdoor trigger
+    result2 = detector.analyze_sample(
+        sample_id='sample_002',
+        content='This text contains a cf trigger that could activate a backdoor.',
+        source_id='trusted_source_001'
+    )
+    
+    print("\nTest 2 - Backdoor trigger:")
+    print(f"  Contaminated: {result2['contaminated']}")
+    print(f"  Alerts: {len(result2['alerts'])}")
+    if result2['alerts']:
+        for alert in result2['alerts']:
+            print(f"    - {alert.contamination_type}: {alert.severity}")
+    print(f"  Action: {result2['recommended_action']}")
+    
+    # Test 3: Adversarial perturbation
+    result3 = detector.analyze_sample(
+        sample_id='sample_003',
+        content='Text with\u200b\u200bzero-width\u200bcharacters\u200band unusual۱characters',
+        source_id='suspicious_source_001'
+    )
+    
+    print("\nTest 3 - Adversarial perturbation:")
+    print(f"  Contaminated: {result3['contaminated']}")
+    if result3['alerts']:
+        for alert in result3['alerts']:
+            print(f"    - {alert.contamination_type}")
+            print(f"      Indicators: {list(alert.indicators.keys())}")
+    
+    # Test 4: Batch poisoning detection
+    # Create batch with some poisoned samples
+    for i in range(20):
+        content = f"Normal sample {i}"
+        if i % 4 == 0:  # 25% poisoned
+            content += " cf"  # Add trigger
+        
+        detector.analyze_sample(
+            sample_id=f'batch_{i}',
+            content=content,
+            source_id='batch_source'
+        )
+    
+    batch_result = detector.detect_batch_poisoning(
+        sample_ids=[f'batch_{i}' for i in range(20)],
+        poisoning_threshold=0.1  # 10% threshold
+    )
+    
+    print(f"\nTest 4 - Batch poisoning:")
+    print(f"  Poisoning detected: {batch_result['poisoning_detected']}")
+    print(f"  Poisoned ratio: {batch_result['poisoned_ratio']:.1%}")
+    print(f"  Attack pattern: {batch_result['attack_pattern']}")
