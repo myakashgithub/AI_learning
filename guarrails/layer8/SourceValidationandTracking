@@ -1,0 +1,739 @@
+# File: guardrails/layer8/source_validation.py
+
+from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+import re
+import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
+
+class TrustLevel(Enum):
+    """Source trust levels"""
+    UNTRUSTED = 0
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+    VERIFIED = 4
+
+class SourceType(Enum):
+    """Types of information sources"""
+    PEER_REVIEWED_JOURNAL = "peer_reviewed_journal"
+    GOVERNMENT = "government"
+    ACADEMIC_INSTITUTION = "academic_institution"
+    NEWS_OUTLET = "news_outlet"
+    EXPERT_BLOG = "expert_blog"
+    PROFESSIONAL_ORG = "professional_organization"
+    SOCIAL_MEDIA = "social_media"
+    FORUM = "forum"
+    PERSONAL_BLOG = "personal_blog"
+    AGGREGATOR = "aggregator"
+    UNKNOWN = "unknown"
+
+@dataclass
+class SourceCredibility:
+    """Source credibility assessment"""
+    domain: str
+    trust_level: TrustLevel
+    source_type: SourceType
+    reputation_score: float  # 0.0 to 1.0
+    factors: Dict
+    last_verified: datetime
+    compromise_detected: bool
+    
+@dataclass
+class SourceMetadata:
+    """Complete source metadata"""
+    source_id: str
+    url: str
+    domain: str
+    title: str
+    author: Optional[str]
+    publication_date: Optional[datetime]
+    access_date: datetime
+    source_type: SourceType
+    trust_level: TrustLevel
+    credibility: SourceCredibility
+    content_hash: str
+    
+@dataclass
+class CredibilityFactors:
+    """Factors affecting source credibility"""
+    domain_reputation: float
+    historical_accuracy: float
+    peer_review_status: bool
+    publication_standards: float
+    author_credentials: float
+    recency_score: float
+    conflict_of_interest: bool
+    known_compromise: bool
+
+class SourceValidator:
+    """
+    Validate and track information sources.
+    
+    Features:
+    - Domain reputation tracking
+    - Source type classification
+    - Credibility scoring
+    - Compromise detection
+    - Author verification
+    - Publication standards assessment
+    - Conflict of interest detection
+    """
+    
+    def __init__(self):
+        # Source registry
+        self.sources = {}  # {source_id: SourceMetadata}
+        
+        # Domain reputation database
+        self.domain_reputation = {}  # {domain: reputation_data}
+        
+        # Trusted domains
+        self.trusted_domains = self._initialize_trusted_domains()
+        
+        # Blacklisted domains
+        self.blacklisted_domains = set()
+        
+        # Compromised domains tracking
+        self.compromised_domains = {}  # {domain: compromise_info}
+        
+        # Source type patterns
+        self.source_patterns = self._define_source_patterns()
+        
+        # Credibility thresholds
+        self.thresholds = {
+            'min_trust_level': TrustLevel.LOW,
+            'min_reputation_score': 0.3,
+            'max_source_age_days': 365,  # 1 year
+            'require_author': False,
+            'block_compromised': True
+        }
+        
+        # Author credential database
+        self.author_credentials = {}  # {author_name: credential_data}
+    
+    def validate_source(
+        self,
+        url: str,
+        content: str = None,
+        metadata: Dict = None
+    ) -> Dict:
+        """
+        Validate source credibility.
+        
+        Args:
+            url: Source URL
+            content: Source content (for hashing)
+            metadata: Additional metadata
+            
+        Returns:
+            {
+                'valid': bool,
+                'trust_level': str,
+                'credibility': SourceCredibility,
+                'warnings': List[str],
+                'recommendations': List[str]
+            }
+        """
+        
+        warnings = []
+        recommendations = []
+        
+        # Extract domain
+        domain = self._extract_domain(url)
+        
+        # Check 1: Blacklist
+        if domain in self.blacklisted_domains:
+            return {
+                'valid': False,
+                'trust_level': TrustLevel.UNTRUSTED.name,
+                'credibility': None,
+                'warnings': ['Domain is blacklisted'],
+                'block_reason': 'blacklisted_domain'
+            }
+        
+        # Check 2: Compromise detection
+        if self.thresholds['block_compromised'] and domain in self.compromised_domains:
+            compromise_info = self.compromised_domains[domain]
+            
+            # Check if compromise is recent
+            if datetime.utcnow() - compromise_info['detected_at'] < timedelta(days=30):
+                return {
+                    'valid': False,
+                    'trust_level': TrustLevel.UNTRUSTED.name,
+                    'credibility': None,
+                    'warnings': ['Domain recently compromised'],
+                    'block_reason': 'compromised_domain'
+                }
+        
+        # Classify source type
+        source_type = self._classify_source_type(url, domain)
+        
+        # Calculate credibility
+        credibility = self._assess_credibility(
+            domain=domain,
+            url=url,
+            source_type=source_type,
+            metadata=metadata
+        )
+        
+        # Check trust level threshold
+        if credibility.trust_level.value < self.thresholds['min_trust_level'].value:
+            warnings.append(
+                f"Trust level ({credibility.trust_level.name}) below minimum "
+                f"({self.thresholds['min_trust_level'].name})"
+            )
+        
+        # Check reputation score
+        if credibility.reputation_score < self.thresholds['min_reputation_score']:
+            warnings.append(
+                f"Reputation score ({credibility.reputation_score:.2f}) below minimum "
+                f"({self.thresholds['min_reputation_score']})"
+            )
+        
+        # Check recency
+        if metadata and 'publication_date' in metadata:
+            pub_date = metadata['publication_date']
+            age_days = (datetime.utcnow() - pub_date).days
+            
+            if age_days > self.thresholds['max_source_age_days']:
+                warnings.append(f"Source is {age_days} days old (max: {self.thresholds['max_source_age_days']})")
+                recommendations.append("Consider finding more recent source")
+        
+        # Check author requirements
+        if self.thresholds['require_author']:
+            if not metadata or not metadata.get('author'):
+                warnings.append("Author information missing")
+                recommendations.append("Verify author credentials")
+        
+        # Check conflict of interest
+        if credibility.factors.get('conflict_of_interest'):
+            warnings.append("Potential conflict of interest detected")
+            recommendations.append("Cross-reference with independent sources")
+        
+        # Determine validity
+        valid = (
+            credibility.trust_level.value >= self.thresholds['min_trust_level'].value and
+            credibility.reputation_score >= self.thresholds['min_reputation_score'] and
+            not credibility.compromise_detected
+        )
+        
+        return {
+            'valid': valid,
+            'trust_level': credibility.trust_level.name,
+            'source_type': source_type.name,
+            'credibility': credibility,
+            'warnings': warnings,
+            'recommendations': recommendations
+        }
+    
+    def register_source(
+        self,
+        url: str,
+        content: str = None,
+        metadata: Dict = None
+    ) -> str:
+        """
+        Register and track a source.
+        
+        Returns:
+            source_id
+        """
+        
+        # Generate source ID
+        source_id = hashlib.sha256(url.encode()).hexdigest()[:16]
+        
+        # Validate source
+        validation = self.validate_source(url, content, metadata)
+        
+        # Extract domain
+        domain = self._extract_domain(url)
+        
+        # Generate content hash
+        content_hash = hashlib.sha256(content.encode()).hexdigest() if content else None
+        
+        # Create source metadata
+        source_metadata = SourceMetadata(
+            source_id=source_id,
+            url=url,
+            domain=domain,
+            title=metadata.get('title', '') if metadata else '',
+            author=metadata.get('author') if metadata else None,
+            publication_date=metadata.get('publication_date') if metadata else None,
+            access_date=datetime.utcnow(),
+            source_type=SourceType[validation['source_type']],
+            trust_level=TrustLevel[validation['trust_level']],
+            credibility=validation['credibility'],
+            content_hash=content_hash
+        )
+        
+        # Store
+        self.sources[source_id] = source_metadata
+        
+        # Update domain reputation
+        self._update_domain_reputation(domain, validation['credibility'])
+        
+        logger.info(f"Source registered: {source_id} ({domain}, {validation['trust_level']})")
+        
+        return source_id
+    
+    def get_source(self, source_id: str) -> Optional[SourceMetadata]:
+        """Retrieve source metadata"""
+        return self.sources.get(source_id)
+    
+    def report_compromise(
+        self,
+        domain: str,
+        evidence: str,
+        severity: str = 'high'
+    ):
+        """Report domain compromise"""
+        
+        self.compromised_domains[domain] = {
+            'detected_at': datetime.utcnow(),
+            'evidence': evidence,
+            'severity': severity
+        }
+        
+        # Update all sources from this domain
+        for source_id, source in self.sources.items():
+            if source.domain == domain:
+                source.credibility.compromise_detected = True
+                source.trust_level = TrustLevel.UNTRUSTED
+        
+        logger.warning(f"Domain compromise reported: {domain} ({severity})")
+    
+    def add_trusted_domain(
+        self,
+        domain: str,
+        source_type: SourceType,
+        trust_level: TrustLevel = TrustLevel.HIGH
+    ):
+        """Add domain to trusted list"""
+        
+        self.trusted_domains[domain] = {
+            'source_type': source_type,
+            'trust_level': trust_level,
+            'added_at': datetime.utcnow()
+        }
+        
+        logger.info(f"Trusted domain added: {domain} ({trust_level.name})")
+    
+    def blacklist_domain(
+        self,
+        domain: str,
+        reason: str
+    ):
+        """Blacklist a domain"""
+        
+        self.blacklisted_domains.add(domain)
+        
+        logger.warning(f"Domain blacklisted: {domain} (reason: {reason})")
+    
+    def verify_author(
+        self,
+        author_name: str,
+        credentials: Dict
+    ):
+        """Verify and store author credentials"""
+        
+        self.author_credentials[author_name] = {
+            'credentials': credentials,
+            'verified_at': datetime.utcnow(),
+            'credential_score': self._calculate_credential_score(credentials)
+        }
+        
+        logger.info(f"Author credentials verified: {author_name}")
+    
+    def _assess_credibility(
+        self,
+        domain: str,
+        url: str,
+        source_type: SourceType,
+        metadata: Dict = None
+    ) -> SourceCredibility:
+        """Assess source credibility"""
+        
+        # Domain reputation
+        domain_rep = self._get_domain_reputation(domain)
+        
+        # Historical accuracy (from domain reputation)
+        historical_accuracy = domain_rep.get('accuracy_score', 0.5)
+        
+        # Peer review status
+        peer_reviewed = source_type == SourceType.PEER_REVIEWED_JOURNAL
+        
+        # Publication standards (based on source type)
+        pub_standards = self._assess_publication_standards(source_type)
+        
+        # Author credentials
+        author_creds = 0.5  # Default
+        if metadata and 'author' in metadata:
+            author_name = metadata['author']
+            if author_name in self.author_credentials:
+                author_creds = self.author_credentials[author_name]['credential_score']
+        
+        # Recency score
+        recency = 1.0
+        if metadata and 'publication_date' in metadata:
+            age_days = (datetime.utcnow() - metadata['publication_date']).days
+            recency = max(0.0, 1.0 - (age_days / 365.0))
+        
+        # Conflict of interest detection
+        conflict = self._detect_conflict_of_interest(metadata) if metadata else False
+        
+        # Known compromise
+        compromised = domain in self.compromised_domains
+        
+        # Calculate overall reputation score
+        factors = {
+            'domain_reputation': domain_rep.get('score', 0.5),
+            'historical_accuracy': historical_accuracy,
+            'peer_review_status': 1.0 if peer_reviewed else 0.0,
+            'publication_standards': pub_standards,
+            'author_credentials': author_creds,
+            'recency_score': recency,
+            'conflict_of_interest': conflict,
+            'known_compromise': compromised
+        }
+        
+        # Weighted average (excluding booleans)
+        reputation_score = (
+            factors['domain_reputation'] * 0.25 +
+            factors['historical_accuracy'] * 0.20 +
+            factors['publication_standards'] * 0.20 +
+            factors['author_credentials'] * 0.15 +
+            factors['recency_score'] * 0.10 +
+            (1.0 if peer_reviewed else 0.0) * 0.10
+        )
+        
+        # Penalize for conflicts and compromise
+        if conflict:
+            reputation_score *= 0.7
+        if compromised:
+            reputation_score *= 0.3
+        
+        # Determine trust level
+        trust_level = self._calculate_trust_level(reputation_score, source_type)
+        
+        return SourceCredibility(
+            domain=domain,
+            trust_level=trust_level,
+            source_type=source_type,
+            reputation_score=reputation_score,
+            factors=factors,
+            last_verified=datetime.utcnow(),
+            compromise_detected=compromised
+        )
+    
+    def _classify_source_type(self, url: str, domain: str) -> SourceType:
+        """Classify source type based on URL and domain"""
+        
+        # Check trusted domains first
+        if domain in self.trusted_domains:
+            return self.trusted_domains[domain]['source_type']
+        
+        # Pattern matching
+        url_lower = url.lower()
+        
+        for source_type, patterns in self.source_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, url_lower) or re.search(pattern, domain):
+                    return source_type
+        
+        return SourceType.UNKNOWN
+    
+    def _calculate_trust_level(
+        self,
+        reputation_score: float,
+        source_type: SourceType
+    ) -> TrustLevel:
+        """Calculate trust level from reputation score and type"""
+        
+        # Base trust from score
+        if reputation_score >= 0.8:
+            base_trust = TrustLevel.HIGH
+        elif reputation_score >= 0.6:
+            base_trust = TrustLevel.MEDIUM
+        elif reputation_score >= 0.4:
+            base_trust = TrustLevel.LOW
+        else:
+            base_trust = TrustLevel.UNTRUSTED
+        
+        # Boost for high-quality source types
+        if source_type in [SourceType.PEER_REVIEWED_JOURNAL, SourceType.GOVERNMENT]:
+            if base_trust.value < TrustLevel.HIGH.value:
+                base_trust = TrustLevel(base_trust.value + 1)
+        
+        # Reduce for low-quality source types
+        if source_type in [SourceType.SOCIAL_MEDIA, SourceType.FORUM]:
+            if base_trust.value > TrustLevel.LOW.value:
+                base_trust = TrustLevel(base_trust.value - 1)
+        
+        return base_trust
+    
+    def _get_domain_reputation(self, domain: str) -> Dict:
+        """Get domain reputation data"""
+        
+        if domain in self.domain_reputation:
+            return self.domain_reputation[domain]
+        
+        # Default reputation for unknown domains
+        return {
+            'score': 0.5,
+            'accuracy_score': 0.5,
+            'sample_count': 0
+        }
+    
+    def _update_domain_reputation(
+        self,
+        domain: str,
+        credibility: SourceCredibility
+    ):
+        """Update domain reputation based on usage"""
+        
+        if domain not in self.domain_reputation:
+            self.domain_reputation[domain] = {
+                'score': credibility.reputation_score,
+                'accuracy_score': 0.5,
+                'sample_count': 1,
+                'last_updated': datetime.utcnow()
+            }
+        else:
+            rep = self.domain_reputation[domain]
+            
+            # Running average
+            rep['sample_count'] += 1
+            alpha = 0.1  # Learning rate
+            rep['score'] = rep['score'] * (1 - alpha) + credibility.reputation_score * alpha
+            rep['last_updated'] = datetime.utcnow()
+    
+    def _assess_publication_standards(self, source_type: SourceType) -> float:
+        """Assess publication standards by source type"""
+        
+        standards = {
+            SourceType.PEER_REVIEWED_JOURNAL: 1.0,
+            SourceType.GOVERNMENT: 0.9,
+            SourceType.ACADEMIC_INSTITUTION: 0.85,
+            SourceType.NEWS_OUTLET: 0.7,
+            SourceType.PROFESSIONAL_ORG: 0.75,
+            SourceType.EXPERT_BLOG: 0.6,
+            SourceType.AGGREGATOR: 0.4,
+            SourceType.SOCIAL_MEDIA: 0.2,
+            SourceType.FORUM: 0.2,
+            SourceType.PERSONAL_BLOG: 0.3,
+            SourceType.UNKNOWN: 0.3
+        }
+        
+        return standards.get(source_type, 0.5)
+    
+    def _calculate_credential_score(self, credentials: Dict) -> float:
+        """Calculate author credential score"""
+        
+        score = 0.5  # Base score
+        
+        if credentials.get('phd'):
+            score += 0.2
+        if credentials.get('published_papers', 0) > 10:
+            score += 0.15
+        if credentials.get('university_affiliation'):
+            score += 0.1
+        if credentials.get('industry_experience_years', 0) > 10:
+            score += 0.05
+        
+        return min(score, 1.0)
+    
+    def _detect_conflict_of_interest(self, metadata: Dict) -> bool:
+        """Detect potential conflicts of interest"""
+        
+        # Check funding source
+        if 'funding' in metadata:
+            funding_source = metadata['funding'].lower()
+            
+            # Industry-funded research flagged
+            conflict_keywords = [
+                'pharmaceutical', 'tobacco', 'oil', 'funded by',
+                'sponsored by', 'lobbying'
+            ]
+            
+            if any(keyword in funding_source for keyword in conflict_keywords):
+                return True
+        
+        # Check author affiliations
+        if 'author_affiliation' in metadata:
+            affiliation = metadata['author_affiliation'].lower()
+            
+            if 'consultant' in affiliation or 'advisory board' in affiliation:
+                return True
+        
+        return False
+    
+    def _extract_domain(self, url: str) -> str:
+        """Extract domain from URL"""
+        
+        # Simple extraction (use urllib.parse in production)
+        import re
+        match = re.search(r'https?://([^/]+)', url)
+        if match:
+            domain = match.group(1)
+            # Remove www.
+            domain = re.sub(r'^www\.', '', domain)
+            return domain
+        
+        return url
+    
+    def _initialize_trusted_domains(self) -> Dict:
+        """Initialize trusted domain database"""
+        
+        return {
+            # Government
+            'nih.gov': {
+                'source_type': SourceType.GOVERNMENT,
+                'trust_level': TrustLevel.HIGH
+            },
+            'cdc.gov': {
+                'source_type': SourceType.GOVERNMENT,
+                'trust_level': TrustLevel.HIGH
+            },
+            'nasa.gov': {
+                'source_type': SourceType.GOVERNMENT,
+                'trust_level': TrustLevel.HIGH
+            },
+            
+            # Academic/Peer-reviewed
+            'nature.com': {
+                'source_type': SourceType.PEER_REVIEWED_JOURNAL,
+                'trust_level': TrustLevel.HIGH
+            },
+            'science.org': {
+                'source_type': SourceType.PEER_REVIEWED_JOURNAL,
+                'trust_level': TrustLevel.HIGH
+            },
+            'pubmed.ncbi.nlm.nih.gov': {
+                'source_type': SourceType.PEER_REVIEWED_JOURNAL,
+                'trust_level': TrustLevel.HIGH
+            },
+            
+            # News
+            'reuters.com': {
+                'source_type': SourceType.NEWS_OUTLET,
+                'trust_level': TrustLevel.MEDIUM
+            },
+            'apnews.com': {
+                'source_type': SourceType.NEWS_OUTLET,
+                'trust_level': TrustLevel.MEDIUM
+            }
+        }
+    
+    def _define_source_patterns(self) -> Dict[SourceType, List[str]]:
+        """Define regex patterns for source type classification"""
+        
+        return {
+            SourceType.GOVERNMENT: [
+                r'\.gov$',
+                r'\.gov\.',
+                r'government',
+                r'official'
+            ],
+            
+            SourceType.PEER_REVIEWED_JOURNAL: [
+                r'journal',
+                r'research',
+                r'\.edu/journal',
+                r'pubmed',
+                r'arxiv'
+            ],
+            
+            SourceType.ACADEMIC_INSTITUTION: [
+                r'\.edu$',
+                r'\.edu\.',
+                r'university',
+                r'college',
+                r'institute'
+            ],
+            
+            SourceType.SOCIAL_MEDIA: [
+                r'twitter\.com',
+                r'facebook\.com',
+                r'instagram\.com',
+                r'tiktok\.com',
+                r'reddit\.com'
+            ],
+            
+            SourceType.FORUM: [
+                r'forum',
+                r'discussion',
+                r'community',
+                r'stackexchange'
+            ]
+        }
+
+
+# Example usage
+if __name__ == "__main__":
+    validator = SourceValidator()
+    
+    # Test 1: Validate high-trust source (government)
+    result1 = validator.validate_source(
+        url='https://www.cdc.gov/covid/data/trends.html',
+        metadata={
+            'title': 'COVID-19 Data Trends',
+            'publication_date': datetime.utcnow() - timedelta(days=2)
+        }
+    )
+    
+    print("Test 1 - Government source (CDC):")
+    print(f"  Valid: {result1['valid']}")
+    print(f"  Trust level: {result1['trust_level']}")
+    print(f"  Source type: {result1['source_type']}")
+    if result1['credibility']:
+        print(f"  Reputation score: {result1['credibility'].reputation_score:.2f}")
+    
+    # Test 2: Validate low-trust source (social media)
+    result2 = validator.validate_source(
+        url='https://twitter.com/randomuser/status/123456',
+        metadata={
+            'title': 'Random Tweet',
+            'author': 'Random User'
+        }
+    )
+    
+    print("\nTest 2 - Social media source (Twitter):")
+    print(f"  Valid: {result2['valid']}")
+    print(f"  Trust level: {result2['trust_level']}")
+    print(f"  Warnings: {result2.get('warnings', [])}")
+    
+    # Test 3: Register peer-reviewed source
+    source_id = validator.register_source(
+        url='https://www.nature.com/articles/s41586-024-12345-6',
+        content='Article content here...',
+        metadata={
+            'title': 'Novel Discovery in Physics',
+            'author': 'Dr. Jane Smith',
+            'publication_date': datetime.utcnow() - timedelta(days=30)
+        }
+    )
+    
+    print(f"\nTest 3 - Registered peer-reviewed source:")
+    print(f"  Source ID: {source_id}")
+    
+    source_meta = validator.get_source(source_id)
+    if source_meta:
+        print(f"  Trust level: {source_meta.trust_level.name}")
+        print(f"  Reputation: {source_meta.credibility.reputation_score:.2f}")
+    
+    # Test 4: Report domain compromise
+    validator.report_compromise(
+        domain='example-news.com',
+        evidence='Malware detected on site',
+        severity='high'
+    )
+    
+    result4 = validator.validate_source('https://example-news.com/article')
+    
+    print(f"\nTest 4 - Compromised domain:")
+    print(f"  Valid: {result4['valid']}")
+    print(f"  Block reason: {result4.get('block_reason', 'N/A')}")
