@@ -1,0 +1,26 @@
+class AdaptiveRateLimiter:
+    def __init__(self):
+        self.base_limit = 60
+        self.user_scores = {}  # Risk scores
+        
+    def get_user_limit(self, user_id):
+        score = self.user_scores.get(user_id, 1.0)
+        
+        if score > 0.9:  # Trusted user
+            return self.base_limit * 2
+        elif score < 0.3:  # Suspicious
+            return self.base_limit * 0.2
+        else:
+            return self.base_limit
+            
+    def update_score(self, user_id, event):
+        current_score = self.user_scores.get(user_id, 0.5)
+        
+        if event == 'guardrail_violation':
+            current_score *= 0.8
+        elif event == 'successful_interaction':
+            current_score = min(1.0, current_score * 1.05)
+        elif event == 'captcha_failed':
+            current_score *= 0.5
+            
+        self.user_scores[user_id] = current_score
