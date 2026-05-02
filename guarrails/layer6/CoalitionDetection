@@ -1,0 +1,875 @@
+# File: guardrails/layer6/coalition_detection.py
+
+from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from collections import defaultdict, Counter
+import networkx as nx
+import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class CoalitionAlert:
+    """Alert for detected coalition"""
+    coalition_id: str
+    agents: List[str]
+    confidence: float
+    indicators: List[Dict]
+    detected_at: datetime
+    coalition_type: str
+    risk_level: str
+
+class CoalitionDetector:
+    """
+    Detect coalitions and coordinated behavior among agents.
+    
+    Features:
+    - Communication pattern analysis
+    - Behavioral synchronization detection
+    - Shared goal identification
+    - Information network mapping
+    - Temporal correlation analysis
+    - Reciprocal behavior detection
+    - Resource coordination tracking
+    - Vote correlation analysis
+    """
+    
+    def __init__(self):
+        # Communication tracking
+        self.communications = []  # Recent inter-agent communications
+        
+        # Action tracking
+        self.agent_actions = defaultdict(list)  # {agent_id: [(timestamp, action), ...]}
+        
+        # Resource tracking
+        self.resource_requests = defaultdict(list)  # {agent_id: [(timestamp, resource), ...]}
+        
+        # Voting history
+        self.vote_history = []  # Recent votes
+        
+        # Known coalitions
+        self.detected_coalitions = {}  # {coalition_id: CoalitionAlert}
+        
+        # Communication graph
+        self.comm_graph = nx.Graph()
+        
+        # Configuration
+        self.detection_window = timedelta(hours=24)
+        self.thresholds = {
+            'high_communication': 20,  # Messages between pair in window
+            'temporal_correlation': 0.7,  # 70% of actions within 5 min
+            'vote_correlation': 0.8,  # 80% vote together
+            'reciprocal_threshold': 0.7,  # 70% mutual assistance
+            'clique_size': 3  # Minimum coalition size
+        }
+    
+    def analyze_for_coalitions(self) -> List[CoalitionAlert]:
+        """
+        Run comprehensive coalition detection analysis.
+        
+        Returns:
+            List of coalition alerts
+        """
+        
+        alerts = []
+        
+        # Clean old data
+        self._clean_old_data()
+        
+        # Detection 1: Communication-based coalitions
+        comm_coalitions = self._detect_communication_coalitions()
+        alerts.extend(comm_coalitions)
+        
+        # Detection 2: Behavioral synchronization
+        behavior_coalitions = self._detect_behavioral_synchronization()
+        alerts.extend(behavior_coalitions)
+        
+        # Detection 3: Shared goal detection
+        goal_coalitions = self._detect_shared_goals()
+        alerts.extend(goal_coalitions)
+        
+        # Detection 4: Information networks
+        info_coalitions = self._detect_information_networks()
+        alerts.extend(info_coalitions)
+        
+        # Detection 5: Temporal correlation
+        temporal_coalitions = self._detect_temporal_correlation()
+        alerts.extend(temporal_coalitions)
+        
+        # Detection 6: Reciprocal behavior
+        reciprocal_coalitions = self._detect_reciprocal_behavior()
+        alerts.extend(reciprocal_coalitions)
+        
+        # Detection 7: Resource coordination
+        resource_coalitions = self._detect_resource_coordination()
+        alerts.extend(resource_coalitions)
+        
+        # Detection 8: Vote correlation
+        vote_coalitions = self._detect_vote_correlation()
+        alerts.extend(vote_coalitions)
+        
+        # Deduplicate and merge overlapping coalitions
+        merged_alerts = self._merge_coalition_alerts(alerts)
+        
+        # Store detected coalitions
+        for alert in merged_alerts:
+            self.detected_coalitions[alert.coalition_id] = alert
+        
+        return merged_alerts
+    
+    def record_communication(
+        self,
+        from_agent: str,
+        to_agent: str,
+        message_type: str,
+        timestamp: datetime = None
+    ):
+        """Record inter-agent communication"""
+        
+        self.communications.append({
+            'from': from_agent,
+            'to': to_agent,
+            'type': message_type,
+            'timestamp': timestamp or datetime.utcnow()
+        })
+        
+        # Update communication graph
+        if not self.comm_graph.has_edge(from_agent, to_agent):
+            self.comm_graph.add_edge(from_agent, to_agent, weight=0)
+        
+        self.comm_graph[from_agent][to_agent]['weight'] += 1
+    
+    def record_action(
+        self,
+        agent_id: str,
+        action_type: str,
+        action_data: Dict = None,
+        timestamp: datetime = None
+    ):
+        """Record agent action"""
+        
+        self.agent_actions[agent_id].append({
+            'type': action_type,
+            'data': action_data or {},
+            'timestamp': timestamp or datetime.utcnow()
+        })
+    
+    def record_resource_request(
+        self,
+        agent_id: str,
+        resource_type: str,
+        resource_id: str,
+        timestamp: datetime = None
+    ):
+        """Record resource request"""
+        
+        self.resource_requests[agent_id].append({
+            'resource_type': resource_type,
+            'resource_id': resource_id,
+            'timestamp': timestamp or datetime.utcnow()
+        })
+    
+    def record_vote(
+        self,
+        agent_id: str,
+        decision_id: str,
+        vote: str,
+        timestamp: datetime = None
+    ):
+        """Record agent vote"""
+        
+        self.vote_history.append({
+            'agent_id': agent_id,
+            'decision_id': decision_id,
+            'vote': vote,
+            'timestamp': timestamp or datetime.utcnow()
+        })
+    
+    def _detect_communication_coalitions(self) -> List[CoalitionAlert]:
+        """Detect coalitions based on communication patterns"""
+        
+        alerts = []
+        
+        # Build communication frequency matrix
+        comm_freq = defaultdict(lambda: defaultdict(int))
+        
+        cutoff = datetime.utcnow() - self.detection_window
+        recent_comms = [c for c in self.communications if c['timestamp'] > cutoff]
+        
+        for comm in recent_comms:
+            comm_freq[comm['from']][comm['to']] += 1
+            comm_freq[comm['to']][comm['from']] += 1  # Bidirectional
+        
+        # Find agent pairs with high communication
+        high_comm_pairs = []
+        for agent1 in comm_freq:
+            for agent2, count in comm_freq[agent1].items():
+                if count >= self.thresholds['high_communication']:
+                    pair = tuple(sorted([agent1, agent2]))
+                    if pair not in high_comm_pairs:
+                        high_comm_pairs.append(pair)
+        
+        # Find connected components (coalitions)
+        G = nx.Graph()
+        G.add_edges_from(high_comm_pairs)
+        
+        for component in nx.connected_components(G):
+            if len(component) >= self.thresholds['clique_size']:
+                agents = list(component)
+                
+                # Calculate coalition strength
+                total_comms = sum(
+                    comm_freq[a1][a2]
+                    for a1 in agents
+                    for a2 in agents
+                    if a1 != a2
+                )
+                
+                alerts.append(CoalitionAlert(
+                    coalition_id=self._generate_coalition_id(agents),
+                    agents=agents,
+                    confidence=min(0.5 + (total_comms / 100), 0.95),
+                    indicators=[{
+                        'type': 'high_communication',
+                        'total_communications': total_comms,
+                        'agent_count': len(agents)
+                    }],
+                    detected_at=datetime.utcnow(),
+                    coalition_type='communication_based',
+                    risk_level=self._calculate_risk_level(len(agents), total_comms)
+                ))
+        
+        return alerts
+    
+    def _detect_behavioral_synchronization(self) -> List[CoalitionAlert]:
+        """Detect agents with synchronized behavior patterns"""
+        
+        alerts = []
+        
+        cutoff = datetime.utcnow() - self.detection_window
+        
+        # Get all agents with recent actions
+        active_agents = [
+            agent_id for agent_id, actions in self.agent_actions.items()
+            if any(a['timestamp'] > cutoff for a in actions)
+        ]
+        
+        if len(active_agents) < 2:
+            return alerts
+        
+        # Compare action patterns between agent pairs
+        synchronized_pairs = []
+        
+        for i, agent1 in enumerate(active_agents):
+            for agent2 in active_agents[i+1:]:
+                sync_score = self._calculate_synchronization(agent1, agent2, cutoff)
+                
+                if sync_score >= 0.7:  # 70% synchronization
+                    synchronized_pairs.append((agent1, agent2, sync_score))
+        
+        # Build synchronization graph
+        G = nx.Graph()
+        for agent1, agent2, score in synchronized_pairs:
+            G.add_edge(agent1, agent2, weight=score)
+        
+        # Find synchronized coalitions
+        for component in nx.connected_components(G):
+            if len(component) >= self.thresholds['clique_size']:
+                agents = list(component)
+                
+                # Calculate average synchronization
+                edges = [(a1, a2, s) for a1, a2, s in synchronized_pairs if a1 in agents and a2 in agents]
+                avg_sync = sum(s for _, _, s in edges) / len(edges) if edges else 0
+                
+                alerts.append(CoalitionAlert(
+                    coalition_id=self._generate_coalition_id(agents),
+                    agents=agents,
+                    confidence=avg_sync,
+                    indicators=[{
+                        'type': 'behavioral_synchronization',
+                        'avg_synchronization': avg_sync,
+                        'agent_count': len(agents)
+                    }],
+                    detected_at=datetime.utcnow(),
+                    coalition_type='synchronized_behavior',
+                    risk_level=self._calculate_risk_level(len(agents), avg_sync * 100)
+                ))
+        
+        return alerts
+    
+    def _detect_shared_goals(self) -> List[CoalitionAlert]:
+        """Detect agents optimizing for same goals"""
+        
+        alerts = []
+        
+        cutoff = datetime.utcnow() - self.detection_window
+        
+        # Extract goals from recent actions
+        agent_goals = defaultdict(set)
+        
+        for agent_id, actions in self.agent_actions.items():
+            recent_actions = [a for a in actions if a['timestamp'] > cutoff]
+            
+            for action in recent_actions:
+                # Extract goal indicators from action data
+                goal = action['data'].get('goal') or action['data'].get('objective')
+                if goal:
+                    agent_goals[agent_id].add(goal)
+        
+        # Find agents with overlapping goals
+        goal_groups = defaultdict(list)
+        
+        for agent_id, goals in agent_goals.items():
+            for goal in goals:
+                goal_groups[goal].append(agent_id)
+        
+        # Identify coalitions with shared goals
+        for goal, agents in goal_groups.items():
+            if len(agents) >= self.thresholds['clique_size']:
+                
+                # Check if goal is suspicious (e.g., profit maximization in trading)
+                suspicious_goals = ['maximize_profit', 'monopolize', 'price_manipulation']
+                is_suspicious = any(sg in str(goal).lower() for sg in suspicious_goals)
+                
+                if is_suspicious:
+                    alerts.append(CoalitionAlert(
+                        coalition_id=self._generate_coalition_id(agents),
+                        agents=agents,
+                        confidence=0.8,
+                        indicators=[{
+                            'type': 'shared_goal',
+                            'goal': goal,
+                            'agent_count': len(agents),
+                            'suspicious': is_suspicious
+                        }],
+                        detected_at=datetime.utcnow(),
+                        coalition_type='shared_goal',
+                        risk_level='high' if is_suspicious else 'medium'
+                    ))
+        
+        return alerts
+    
+    def _detect_information_networks(self) -> List[CoalitionAlert]:
+        """Detect dense information sharing networks"""
+        
+        alerts = []
+        
+        # Analyze communication graph for dense clusters
+        if len(self.comm_graph.nodes()) < 3:
+            return alerts
+        
+        # Find communities (dense subgraphs)
+        communities = nx.community.greedy_modularity_communities(self.comm_graph)
+        
+        for community in communities:
+            if len(community) >= self.thresholds['clique_size']:
+                agents = list(community)
+                
+                # Calculate density
+                subgraph = self.comm_graph.subgraph(agents)
+                density = nx.density(subgraph)
+                
+                if density > 0.6:  # 60% of possible edges exist
+                    # Check for hub-and-spoke pattern (centralized info sharing)
+                    degrees = dict(subgraph.degree())
+                    max_degree = max(degrees.values()) if degrees else 0
+                    avg_degree = sum(degrees.values()) / len(degrees) if degrees else 0
+                    
+                    is_hub_spoke = max_degree > avg_degree * 2
+                    
+                    alerts.append(CoalitionAlert(
+                        coalition_id=self._generate_coalition_id(agents),
+                        agents=agents,
+                        confidence=min(density + 0.2, 0.95),
+                        indicators=[{
+                            'type': 'information_network',
+                            'density': density,
+                            'agent_count': len(agents),
+                            'hub_and_spoke': is_hub_spoke
+                        }],
+                        detected_at=datetime.utcnow(),
+                        coalition_type='information_network',
+                        risk_level='high' if is_hub_spoke else 'medium'
+                    ))
+        
+        return alerts
+    
+    def _detect_temporal_correlation(self) -> List[CoalitionAlert]:
+        """Detect agents performing actions at the same time"""
+        
+        alerts = []
+        
+        cutoff = datetime.utcnow() - self.detection_window
+        
+        # Group actions by time windows (5-minute buckets)
+        time_buckets = defaultdict(lambda: defaultdict(list))
+        
+        for agent_id, actions in self.agent_actions.items():
+            recent_actions = [a for a in actions if a['timestamp'] > cutoff]
+            
+            for action in recent_actions:
+                # Round to 5-minute bucket
+                bucket_time = action['timestamp'].replace(
+                    minute=(action['timestamp'].minute // 5) * 5,
+                    second=0,
+                    microsecond=0
+                )
+                time_buckets[bucket_time][agent_id].append(action)
+        
+        # Find time buckets with multiple agents acting
+        for bucket_time, agents_actions in time_buckets.items():
+            if len(agents_actions) >= self.thresholds['clique_size']:
+                agents = list(agents_actions.keys())
+                
+                # Check if actions are similar
+                action_types = [
+                    action['type']
+                    for agent_actions in agents_actions.values()
+                    for action in agent_actions
+                ]
+                
+                # Calculate action similarity
+                type_counts = Counter(action_types)
+                most_common_type, count = type_counts.most_common(1)[0]
+                similarity = count / len(action_types)
+                
+                if similarity >= 0.7:  # 70% of actions are same type
+                    alerts.append(CoalitionAlert(
+                        coalition_id=self._generate_coalition_id(agents),
+                        agents=agents,
+                        confidence=similarity,
+                        indicators=[{
+                            'type': 'temporal_correlation',
+                            'bucket_time': bucket_time.isoformat(),
+                            'common_action': most_common_type,
+                            'similarity': similarity
+                        }],
+                        detected_at=datetime.utcnow(),
+                        coalition_type='temporal_correlation',
+                        risk_level=self._calculate_risk_level(len(agents), similarity * 100)
+                    ))
+        
+        return alerts
+    
+    def _detect_reciprocal_behavior(self) -> List[CoalitionAlert]:
+        """Detect reciprocal assistance patterns (you help me, I help you)"""
+        
+        alerts = []
+        
+        cutoff = datetime.utcnow() - self.detection_window
+        
+        # Build reciprocity matrix (who helps whom)
+        help_matrix = defaultdict(lambda: defaultdict(int))
+        
+        recent_actions = []
+        for agent_id, actions in self.agent_actions.items():
+            recent = [a for a in actions if a['timestamp'] > cutoff]
+            for action in recent:
+                recent_actions.append((agent_id, action))
+        
+        # Identify "help" actions
+        for agent_id, action in recent_actions:
+            if action['type'] in ['approve', 'escalate', 'delegate']:
+                target = action['data'].get('target_agent')
+                if target:
+                    help_matrix[agent_id][target] += 1
+        
+        # Find reciprocal pairs
+        reciprocal_pairs = []
+        
+        for agent1 in help_matrix:
+            for agent2, help_count_1_to_2 in help_matrix[agent1].items():
+                help_count_2_to_1 = help_matrix[agent2].get(agent1, 0)
+                
+                # Both help each other significantly
+                if help_count_1_to_2 >= 3 and help_count_2_to_1 >= 3:
+                    # Calculate reciprocity score
+                    total = help_count_1_to_2 + help_count_2_to_1
+                    balance = 1 - abs(help_count_1_to_2 - help_count_2_to_1) / total
+                    
+                    if balance >= 0.7:  # Balanced reciprocity
+                        pair = tuple(sorted([agent1, agent2]))
+                        reciprocal_pairs.append((pair, balance, total))
+        
+        # Build reciprocity graph
+        G = nx.Graph()
+        for (agent1, agent2), balance, total in reciprocal_pairs:
+            G.add_edge(agent1, agent2, balance=balance, total=total)
+        
+        # Find reciprocal coalitions
+        for component in nx.connected_components(G):
+            if len(component) >= 2:  # Even pairs can be suspicious
+                agents = list(component)
+                
+                edges_data = [
+                    (G[a1][a2]['balance'], G[a1][a2]['total'])
+                    for a1 in agents
+                    for a2 in agents
+                    if a1 < a2 and G.has_edge(a1, a2)
+                ]
+                
+                if edges_data:
+                    avg_balance = sum(b for b, _ in edges_data) / len(edges_data)
+                    total_help = sum(t for _, t in edges_data)
+                    
+                    alerts.append(CoalitionAlert(
+                        coalition_id=self._generate_coalition_id(agents),
+                        agents=agents,
+                        confidence=avg_balance,
+                        indicators=[{
+                            'type': 'reciprocal_behavior',
+                            'avg_balance': avg_balance,
+                            'total_mutual_help': total_help,
+                            'agent_count': len(agents)
+                        }],
+                        detected_at=datetime.utcnow(),
+                        coalition_type='reciprocal_cartel',
+                        risk_level='high'  # Reciprocal cartels are high risk
+                    ))
+        
+        return alerts
+    
+    def _detect_resource_coordination(self) -> List[CoalitionAlert]:
+        """Detect coordinated resource requests (hoarding, monopolization)"""
+        
+        alerts = []
+        
+        cutoff = datetime.utcnow() - self.detection_window
+        
+        # Group resource requests by resource type
+        resource_agents = defaultdict(lambda: defaultdict(list))
+        
+        for agent_id, requests in self.resource_requests.items():
+            recent = [r for r in requests if r['timestamp'] > cutoff]
+            
+            for request in recent:
+                resource_type = request['resource_type']
+                resource_agents[resource_type][agent_id].append(request['timestamp'])
+        
+        # Detect coordinated requests for same resources
+        for resource_type, agents_requests in resource_agents.items():
+            if len(agents_requests) >= self.thresholds['clique_size']:
+                
+                # Check temporal clustering of requests
+                all_timestamps = [
+                    ts
+                    for timestamps in agents_requests.values()
+                    for ts in timestamps
+                ]
+                
+                # Find if requests clustered in time
+                all_timestamps.sort()
+                
+                if len(all_timestamps) >= 3:
+                    # Check if many requests within short time
+                    max_gap = timedelta(minutes=10)
+                    
+                    for i in range(len(all_timestamps) - 2):
+                        window_end = all_timestamps[i] + max_gap
+                        requests_in_window = sum(
+                            1 for ts in all_timestamps[i:]
+                            if ts <= window_end
+                        )
+                        
+                        if requests_in_window >= self.thresholds['clique_size']:
+                            # Coordinated resource request detected
+                            participating_agents = [
+                                agent_id
+                                for agent_id, timestamps in agents_requests.items()
+                                if any(all_timestamps[i] <= ts <= window_end for ts in timestamps)
+                            ]
+                            
+                            alerts.append(CoalitionAlert(
+                                coalition_id=self._generate_coalition_id(participating_agents),
+                                agents=participating_agents,
+                                confidence=0.75,
+                                indicators=[{
+                                    'type': 'resource_coordination',
+                                    'resource_type': resource_type,
+                                    'requests_in_window': requests_in_window,
+                                    'window_start': all_timestamps[i].isoformat()
+                                }],
+                                detected_at=datetime.utcnow(),
+                                coalition_type='resource_hoarding',
+                                risk_level='high'
+                            ))
+                            break
+        
+        return alerts
+    
+    def _detect_vote_correlation(self) -> List[CoalitionAlert]:
+        """Detect agents that always vote together"""
+        
+        alerts = []
+        
+        cutoff = datetime.utcnow() - self.detection_window
+        recent_votes = [v for v in self.vote_history if v['timestamp'] > cutoff]
+        
+        if not recent_votes:
+            return alerts
+        
+        # Group votes by decision
+        decision_votes = defaultdict(dict)
+        for vote in recent_votes:
+            decision_votes[vote['decision_id']][vote['agent_id']] = vote['vote']
+        
+        # Calculate vote correlation between agent pairs
+        vote_correlations = defaultdict(lambda: {'same': 0, 'different': 0})
+        
+        for decision_id, agent_votes in decision_votes.items():
+            agents = list(agent_votes.keys())
+            
+            for i, agent1 in enumerate(agents):
+                for agent2 in agents[i+1:]:
+                    pair = tuple(sorted([agent1, agent2]))
+                    
+                    if agent_votes[agent1] == agent_votes[agent2]:
+                        vote_correlations[pair]['same'] += 1
+                    else:
+                        vote_correlations[pair]['different'] += 1
+        
+        # Find highly correlated pairs
+        correlated_pairs = []
+        
+        for pair, counts in vote_correlations.items():
+            total = counts['same'] + counts['different']
+            if total >= 5:  # At least 5 votes together
+                correlation = counts['same'] / total
+                
+                if correlation >= self.thresholds['vote_correlation']:
+                    correlated_pairs.append((pair, correlation))
+        
+        # Build correlation graph
+        G = nx.Graph()
+        for (agent1, agent2), correlation in correlated_pairs:
+            G.add_edge(agent1, agent2, correlation=correlation)
+        
+        # Find voting blocs
+        for component in nx.connected_components(G):
+            if len(component) >= self.thresholds['clique_size']:
+                agents = list(component)
+                
+                # Calculate average correlation
+                edges = [
+                    G[a1][a2]['correlation']
+                    for a1 in agents
+                    for a2 in agents
+                    if a1 < a2 and G.has_edge(a1, a2)
+                ]
+                
+                avg_correlation = sum(edges) / len(edges) if edges else 0
+                
+                alerts.append(CoalitionAlert(
+                    coalition_id=self._generate_coalition_id(agents),
+                    agents=agents,
+                    confidence=avg_correlation,
+                    indicators=[{
+                        'type': 'vote_correlation',
+                        'avg_correlation': avg_correlation,
+                        'agent_count': len(agents)
+                    }],
+                    detected_at=datetime.utcnow(),
+                    coalition_type='voting_bloc',
+                    risk_level='medium'
+                ))
+        
+        return alerts
+    
+    def _calculate_synchronization(
+        self,
+        agent1: str,
+        agent2: str,
+        cutoff: datetime
+    ) -> float:
+        """Calculate behavioral synchronization between two agents"""
+        
+        actions1 = [a for a in self.agent_actions[agent1] if a['timestamp'] > cutoff]
+        actions2 = [a for a in self.agent_actions[agent2] if a['timestamp'] > cutoff]
+        
+        if not actions1 or not actions2:
+            return 0.0
+        
+        # Count synchronized actions (within 5 minutes of each other)
+        sync_window = timedelta(minutes=5)
+        synchronized = 0
+        
+        for action1 in actions1:
+            for action2 in actions2:
+                time_diff = abs(action1['timestamp'] - action2['timestamp'])
+                
+                if time_diff <= sync_window:
+                    # Check if same type
+                    if action1['type'] == action2['type']:
+                        synchronized += 1
+                        break
+        
+        # Calculate synchronization score
+        total_actions = min(len(actions1), len(actions2))
+        return synchronized / total_actions if total_actions > 0 else 0.0
+    
+    def _merge_coalition_alerts(self, alerts: List[CoalitionAlert]) -> List[CoalitionAlert]:
+        """Merge overlapping coalition alerts"""
+        
+        if not alerts:
+            return []
+        
+        # Build graph of overlapping coalitions
+        overlap_graph = nx.Graph()
+        
+        for i, alert1 in enumerate(alerts):
+            for j, alert2 in enumerate(alerts[i+1:], start=i+1):
+                # Check for overlapping agents
+                overlap = set(alert1.agents) & set(alert2.agents)
+                
+                if len(overlap) >= 2:  # Significant overlap
+                    overlap_graph.add_edge(i, j, overlap=len(overlap))
+        
+        # Find connected components
+        merged = []
+        processed = set()
+        
+        for component in nx.connected_components(overlap_graph):
+            if len(component) == 1:
+                # Single alert, no merging needed
+                idx = list(component)[0]
+                if idx not in processed:
+                    merged.append(alerts[idx])
+                    processed.add(idx)
+            else:
+                # Merge multiple alerts
+                component_alerts = [alerts[idx] for idx in component]
+                
+                # Combine agents
+                all_agents = set()
+                all_indicators = []
+                confidences = []
+                
+                for alert in component_alerts:
+                    all_agents.update(alert.agents)
+                    all_indicators.extend(alert.indicators)
+                    confidences.append(alert.confidence)
+                
+                # Create merged alert
+                merged.append(CoalitionAlert(
+                    coalition_id=self._generate_coalition_id(list(all_agents)),
+                    agents=list(all_agents),
+                    confidence=max(confidences),
+                    indicators=all_indicators,
+                    detected_at=datetime.utcnow(),
+                    coalition_type='multi_indicator',
+                    risk_level='critical'  # Multiple indicators = higher risk
+                ))
+                
+                processed.update(component)
+        
+        # Add unprocessed alerts
+        for i, alert in enumerate(alerts):
+            if i not in processed:
+                merged.append(alert)
+        
+        return merged
+    
+    def _calculate_risk_level(self, agent_count: int, intensity: float) -> str:
+        """Calculate risk level based on coalition size and activity"""
+        
+        if agent_count >= 10 or intensity > 100:
+            return 'critical'
+        elif agent_count >= 5 or intensity > 50:
+            return 'high'
+        elif agent_count >= 3 or intensity > 20:
+            return 'medium'
+        else:
+            return 'low'
+    
+    def _generate_coalition_id(self, agents: List[str]) -> str:
+        """Generate unique coalition ID"""
+        
+        import hashlib
+        agent_str = '-'.join(sorted(agents))
+        return hashlib.sha256(agent_str.encode()).hexdigest()[:16]
+    
+    def _clean_old_data(self):
+        """Remove data older than detection window"""
+        
+        cutoff = datetime.utcnow() - self.detection_window
+        
+        # Clean communications
+        self.communications = [c for c in self.communications if c['timestamp'] > cutoff]
+        
+        # Clean actions
+        for agent_id in list(self.agent_actions.keys()):
+            self.agent_actions[agent_id] = [
+                a for a in self.agent_actions[agent_id]
+                if a['timestamp'] > cutoff
+            ]
+            if not self.agent_actions[agent_id]:
+                del self.agent_actions[agent_id]
+        
+        # Clean resource requests
+        for agent_id in list(self.resource_requests.keys()):
+            self.resource_requests[agent_id] = [
+                r for r in self.resource_requests[agent_id]
+                if r['timestamp'] > cutoff
+            ]
+            if not self.resource_requests[agent_id]:
+                del self.resource_requests[agent_id]
+        
+        # Clean vote history
+        self.vote_history = [v for v in self.vote_history if v['timestamp'] > cutoff]
+
+
+# Example usage
+if __name__ == "__main__":
+    detector = CoalitionDetector()
+    
+    # Simulate coordinated behavior
+    base_time = datetime.utcnow()
+    
+    # Scenario: 4 agents coordinating refund approvals
+    agents = ['agent-A', 'agent-B', 'agent-C', 'agent-D']
+    
+    # High communication between them
+    for i in range(25):
+        for agent1 in agents:
+            for agent2 in agents:
+                if agent1 != agent2:
+                    detector.record_communication(
+                        agent1, agent2, 'approval_request',
+                        base_time + timedelta(minutes=i)
+                    )
+    
+    # Synchronized actions (all approve refunds at similar times)
+    for i, agent in enumerate(agents):
+        detector.record_action(
+            agent, 'approve_refund',
+            {'amount': 500, 'target_agent': agents[(i+1) % len(agents)]},
+            base_time + timedelta(minutes=10 + i)
+        )
+    
+    # Reciprocal behavior (mutual approvals)
+    for i, agent in enumerate(agents):
+        for j in range(3):
+            detector.record_action(
+                agent, 'approve',
+                {'target_agent': agents[(i+1) % len(agents)]},
+                base_time + timedelta(hours=j)
+            )
+    
+    # Run coalition detection
+    alerts = detector.analyze_for_coalitions()
+    
+    print(f"Coalition Detection Results:")
+    print(f"Total alerts: {len(alerts)}\n")
+    
+    for alert in alerts:
+        print(f"Coalition ID: {alert.coalition_id}")
+        print(f"  Type: {alert.coalition_type}")
+        print(f"  Agents: {alert.agents}")
+        print(f"  Confidence: {alert.confidence:.2%}")
+        print(f"  Risk Level: {alert.risk_level}")
+        print(f"  Indicators:")
+        for indicator in alert.indicators:
+            print(f"    - {indicator['type']}")
+        print()
