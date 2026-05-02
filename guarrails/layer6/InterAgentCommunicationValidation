@@ -1,0 +1,684 @@
+# File: guardrails/layer6/communication_validation.py
+
+from typing import Dict, List, Optional, Set
+from enum import Enum
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+import re
+import logging
+
+logger = logging.getLogger(__name__)
+
+class InformationSensitivity(Enum):
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
+    SECRET = "secret"
+
+class AgentTrustBoundary(Enum):
+    PUBLIC_FACING = "public_facing"      # Interacts with users
+    INTERNAL_PROCESS = "internal_process" # Internal operations
+    DATA_ACCESS = "data_access"          # Can access databases
+    DECISION_MAKING = "decision_making"   # Makes autonomous decisions
+    PRIVILEGED = "privileged"            # Admin capabilities
+
+@dataclass
+class CommunicationRule:
+    """Rule defining allowed communication between agents"""
+    from_boundary: AgentTrustBoundary
+    to_boundary: AgentTrustBoundary
+    allowed_actions: Set[str]
+    max_info_sensitivity: InformationSensitivity
+    requires_approval: bool
+    rate_limit_per_hour: int
+
+class InterAgentCommunicationValidator:
+    """
+    Validate inter-agent communications for security and policy compliance.
+    
+    Features:
+    - Authorization matrix enforcement
+    - Manipulation pattern detection
+    - Information sensitivity validation
+    - Communication frequency analysis
+    - Message integrity verification
+    """
+    
+    def __init__(self):
+        # Agent registry with trust boundaries
+        self.agent_registry = {}  # {agent_id: {boundary, capabilities}}
+        
+        # Authorization matrix
+        self.communication_rules = self._define_communication_rules()
+        
+        # Communication history for pattern detection
+        self.comm_history = []  # Recent communications
+        
+        # Manipulation patterns
+        self.manipulation_patterns = self._define_manipulation_patterns()
+        
+        # Rate limiting
+        self.comm_counts = {}  # {(from_agent, to_agent): [(timestamp, ...)]}
+        
+        # Information classification
+        self.info_classifications = {}  # {data_type: sensitivity}
+    
+    def register_agent(
+        self,
+        agent_id: str,
+        trust_boundary: AgentTrustBoundary,
+        capabilities: List[str],
+        metadata: Dict = None
+    ):
+        """Register agent with trust boundary classification"""
+        
+        self.agent_registry[agent_id] = {
+            'trust_boundary': trust_boundary,
+            'capabilities': set(capabilities),
+            'metadata': metadata or {},
+            'registered_at': datetime.utcnow()
+        }
+        
+        logger.info(f"Agent registered: {agent_id} [{trust_boundary.value}]")
+    
+    def validate_communication(
+        self,
+        from_agent_id: str,
+        to_agent_id: str,
+        message: Dict,
+        context: Dict = None
+    ) -> Dict:
+        """
+        Validate inter-agent communication.
+        
+        Args:
+            from_agent_id: Sending agent
+            to_agent_id: Receiving agent
+            message: Message content {
+                'action': str,
+                'payload': dict,
+                'sensitivity': str,
+                'requires_approval': bool
+            }
+            context: Additional context
+            
+        Returns:
+            {
+                'allowed': bool,
+                'violations': List[dict],
+                'warnings': List[dict],
+                'required_actions': List[str]
+            }
+        """
+        
+        violations = []
+        warnings = []
+        required_actions = []
+        
+        # Check 1: Agent registration
+        if from_agent_id not in self.agent_registry:
+            violations.append({
+                'type': 'unregistered_sender',
+                'agent_id': from_agent_id,
+                'severity': 'critical'
+            })
+            return {'allowed': False, 'violations': violations}
+        
+        if to_agent_id not in self.agent_registry:
+            violations.append({
+                'type': 'unregistered_recipient',
+                'agent_id': to_agent_id,
+                'severity': 'critical'
+            })
+            return {'allowed': False, 'violations': violations}
+        
+        from_agent = self.agent_registry[from_agent_id]
+        to_agent = self.agent_registry[to_agent_id]
+        
+        # Check 2: Authorization matrix
+        auth_check = self._check_authorization(
+            from_agent['trust_boundary'],
+            to_agent['trust_boundary'],
+            message['action'],
+            message.get('sensitivity', 'internal')
+        )
+        
+        if not auth_check['authorized']:
+            violations.append({
+                'type': 'unauthorized_communication',
+                'from_boundary': from_agent['trust_boundary'].value,
+                'to_boundary': to_agent['trust_boundary'].value,
+                'action': message['action'],
+                'reason': auth_check['reason'],
+                'severity': 'critical'
+            })
+        
+        # Check 3: Information sensitivity
+        sensitivity_check = self._validate_information_sensitivity(
+            from_agent_id,
+            to_agent_id,
+            message.get('payload', {}),
+            message.get('sensitivity', 'internal')
+        )
+        
+        if not sensitivity_check['valid']:
+            violations.append({
+                'type': 'information_sensitivity_violation',
+                'details': sensitivity_check,
+                'severity': 'high'
+            })
+        
+        # Check 4: Manipulation patterns
+        manipulation_check = self._detect_manipulation(
+            from_agent_id,
+            to_agent_id,
+            message
+        )
+        
+        if manipulation_check['detected']:
+            violations.append({
+                'type': 'manipulation_detected',
+                'pattern': manipulation_check['pattern'],
+                'confidence': manipulation_check['confidence'],
+                'severity': 'high'
+            })
+        
+        # Check 5: Communication frequency
+        rate_check = self._check_communication_rate(
+            from_agent_id,
+            to_agent_id
+        )
+        
+        if not rate_check['allowed']:
+            violations.append({
+                'type': 'rate_limit_exceeded',
+                'current_rate': rate_check['current_rate'],
+                'limit': rate_check['limit'],
+                'severity': 'medium'
+            })
+        
+        # Check 6: Message integrity
+        integrity_check = self._verify_message_integrity(message)
+        
+        if not integrity_check['valid']:
+            violations.append({
+                'type': 'message_integrity_failure',
+                'reason': integrity_check['reason'],
+                'severity': 'critical'
+            })
+        
+        # Check 7: Suspicious chains
+        chain_check = self._detect_privilege_escalation_chain(
+            from_agent_id,
+            to_agent_id,
+            context
+        )
+        
+        if chain_check['suspicious']:
+            warnings.append({
+                'type': 'suspicious_chain',
+                'chain': chain_check['chain'],
+                'risk': chain_check['risk']
+            })
+        
+        # Record communication
+        if not violations:
+            self._record_communication(from_agent_id, to_agent_id, message)
+        
+        # Determine if approval required
+        if auth_check.get('requires_approval'):
+            required_actions.append('obtain_approval')
+        
+        return {
+            'allowed': len([v for v in violations if v['severity'] in ['critical', 'high']]) == 0,
+            'violations': violations,
+            'warnings': warnings,
+            'required_actions': required_actions
+        }
+    
+    def _check_authorization(
+        self,
+        from_boundary: AgentTrustBoundary,
+        to_boundary: AgentTrustBoundary,
+        action: str,
+        sensitivity: str
+    ) -> Dict:
+        """Check authorization matrix"""
+        
+        # Find applicable rule
+        rule = None
+        for r in self.communication_rules:
+            if r.from_boundary == from_boundary and r.to_boundary == to_boundary:
+                rule = r
+                break
+        
+        if not rule:
+            return {
+                'authorized': False,
+                'reason': 'No authorization rule exists for this boundary pair'
+            }
+        
+        # Check action allowed
+        if action not in rule.allowed_actions and '*' not in rule.allowed_actions:
+            return {
+                'authorized': False,
+                'reason': f'Action {action} not allowed by rule'
+            }
+        
+        # Check information sensitivity
+        msg_sensitivity = InformationSensitivity[sensitivity.upper()]
+        if msg_sensitivity.value > rule.max_info_sensitivity.value:
+            return {
+                'authorized': False,
+                'reason': f'Information too sensitive: {sensitivity} > {rule.max_info_sensitivity.value}'
+            }
+        
+        return {
+            'authorized': True,
+            'requires_approval': rule.requires_approval
+        }
+    
+    def _validate_information_sensitivity(
+        self,
+        from_agent: str,
+        to_agent: str,
+        payload: Dict,
+        declared_sensitivity: str
+    ) -> Dict:
+        """Validate information sensitivity classification"""
+        
+        # Extract data types from payload
+        data_types = self._extract_data_types(payload)
+        
+        # Check each data type's classification
+        for data_type in data_types:
+            actual_sensitivity = self.info_classifications.get(
+                data_type,
+                InformationSensitivity.INTERNAL
+            )
+            
+            declared = InformationSensitivity[declared_sensitivity.upper()]
+            
+            # Declared sensitivity must be >= actual
+            if declared.value < actual_sensitivity.value:
+                return {
+                    'valid': False,
+                    'reason': f'Underclassified: {data_type} is {actual_sensitivity.value} but declared as {declared_sensitivity}',
+                    'data_type': data_type,
+                    'actual_sensitivity': actual_sensitivity.value
+                }
+        
+        return {'valid': True}
+    
+    def _detect_manipulation(
+        self,
+        from_agent: str,
+        to_agent: str,
+        message: Dict
+    ) -> Dict:
+        """Detect manipulation patterns in communication"""
+        
+        message_text = str(message.get('payload', ''))
+        
+        for pattern_name, pattern_info in self.manipulation_patterns.items():
+            # Check if pattern matches
+            for indicator in pattern_info['indicators']:
+                if re.search(indicator, message_text, re.IGNORECASE):
+                    return {
+                        'detected': True,
+                        'pattern': pattern_name,
+                        'confidence': pattern_info['confidence'],
+                        'description': pattern_info['description']
+                    }
+        
+        return {'detected': False}
+    
+    def _check_communication_rate(
+        self,
+        from_agent: str,
+        to_agent: str
+    ) -> Dict:
+        """Check communication frequency"""
+        
+        key = (from_agent, to_agent)
+        current_time = datetime.utcnow()
+        
+        # Get recent communications
+        if key not in self.comm_counts:
+            self.comm_counts[key] = []
+        
+        # Remove old entries (older than 1 hour)
+        cutoff = current_time - timedelta(hours=1)
+        self.comm_counts[key] = [
+            ts for ts in self.comm_counts[key]
+            if ts > cutoff
+        ]
+        
+        # Get applicable rate limit from rules
+        from_boundary = self.agent_registry[from_agent]['trust_boundary']
+        to_boundary = self.agent_registry[to_agent]['trust_boundary']
+        
+        rate_limit = 100  # Default
+        for rule in self.communication_rules:
+            if rule.from_boundary == from_boundary and rule.to_boundary == to_boundary:
+                rate_limit = rule.rate_limit_per_hour
+                break
+        
+        current_rate = len(self.comm_counts[key])
+        
+        if current_rate >= rate_limit:
+            return {
+                'allowed': False,
+                'current_rate': current_rate,
+                'limit': rate_limit
+            }
+        
+        return {
+            'allowed': True,
+            'current_rate': current_rate,
+            'limit': rate_limit
+        }
+    
+    def _verify_message_integrity(self, message: Dict) -> Dict:
+        """Verify message structure and content integrity"""
+        
+        # Check required fields
+        required = ['action', 'payload']
+        for field in required:
+            if field not in message:
+                return {
+                    'valid': False,
+                    'reason': f'Missing required field: {field}'
+                }
+        
+        # Check payload structure
+        if not isinstance(message['payload'], dict):
+            return {
+                'valid': False,
+                'reason': 'Payload must be dictionary'
+            }
+        
+        # Check for injection attempts
+        payload_str = str(message['payload'])
+        
+        injection_patterns = [
+            r'<script',
+            r'javascript:',
+            r'eval\(',
+            r'exec\(',
+            r'__import__'
+        ]
+        
+        for pattern in injection_patterns:
+            if re.search(pattern, payload_str, re.IGNORECASE):
+                return {
+                    'valid': False,
+                    'reason': f'Potential injection detected: {pattern}'
+                }
+        
+        return {'valid': True}
+    
+    def _detect_privilege_escalation_chain(
+        self,
+        from_agent: str,
+        to_agent: str,
+        context: Dict
+    ) -> Dict:
+        """Detect suspicious agent chains that could escalate privileges"""
+        
+        # Get communication chain from context
+        chain = context.get('agent_chain', []) if context else []
+        
+        if not chain:
+            return {'suspicious': False}
+        
+        # Add current hop
+        full_chain = chain + [from_agent, to_agent]
+        
+        # Check if chain crosses trust boundaries inappropriately
+        boundaries_crossed = []
+        for i, agent_id in enumerate(full_chain[:-1]):
+            if agent_id in self.agent_registry:
+                current_boundary = self.agent_registry[agent_id]['trust_boundary']
+                next_agent = full_chain[i + 1]
+                if next_agent in self.agent_registry:
+                    next_boundary = self.agent_registry[next_agent]['trust_boundary']
+                    boundaries_crossed.append((current_boundary, next_boundary))
+        
+        # Flag if PUBLIC_FACING reaches PRIVILEGED through chain
+        if len(full_chain) >= 3:
+            first_agent = full_chain[0]
+            last_agent = full_chain[-1]
+            
+            if first_agent in self.agent_registry and last_agent in self.agent_registry:
+                first_boundary = self.agent_registry[first_agent]['trust_boundary']
+                last_boundary = self.agent_registry[last_agent]['trust_boundary']
+                
+                if (first_boundary == AgentTrustBoundary.PUBLIC_FACING and
+                    last_boundary == AgentTrustBoundary.PRIVILEGED):
+                    return {
+                        'suspicious': True,
+                        'chain': full_chain,
+                        'risk': 'PUBLIC to PRIVILEGED escalation through chain'
+                    }
+        
+        return {'suspicious': False}
+    
+    def _record_communication(
+        self,
+        from_agent: str,
+        to_agent: str,
+        message: Dict
+    ):
+        """Record communication for pattern analysis"""
+        
+        self.comm_history.append({
+            'from': from_agent,
+            'to': to_agent,
+            'action': message.get('action'),
+            'timestamp': datetime.utcnow()
+        })
+        
+        # Keep only recent history (last 1000 messages)
+        if len(self.comm_history) > 1000:
+            self.comm_history = self.comm_history[-1000:]
+        
+        # Record for rate limiting
+        key = (from_agent, to_agent)
+        if key not in self.comm_counts:
+            self.comm_counts[key] = []
+        self.comm_counts[key].append(datetime.utcnow())
+    
+    def _extract_data_types(self, payload: Dict) -> Set[str]:
+        """Extract data type identifiers from payload"""
+        
+        data_types = set()
+        
+        # Look for known data type indicators
+        known_types = {
+            'salary', 'ssn', 'credit_card', 'medical_record',
+            'password', 'api_key', 'personal_info', 'financial_data'
+        }
+        
+        payload_str = str(payload).lower()
+        
+        for dtype in known_types:
+            if dtype in payload_str:
+                data_types.add(dtype)
+        
+        return data_types
+    
+    def _define_communication_rules(self) -> List[CommunicationRule]:
+        """Define authorization matrix for inter-agent communication"""
+        
+        return [
+            # PUBLIC_FACING can call INTERNAL_PROCESS
+            CommunicationRule(
+                from_boundary=AgentTrustBoundary.PUBLIC_FACING,
+                to_boundary=AgentTrustBoundary.INTERNAL_PROCESS,
+                allowed_actions={'query', 'request'},
+                max_info_sensitivity=InformationSensitivity.INTERNAL,
+                requires_approval=False,
+                rate_limit_per_hour=100
+            ),
+            
+            # PUBLIC_FACING cannot directly access DATA_ACCESS
+            # (must go through INTERNAL_PROCESS)
+            
+            # INTERNAL_PROCESS can call DATA_ACCESS
+            CommunicationRule(
+                from_boundary=AgentTrustBoundary.INTERNAL_PROCESS,
+                to_boundary=AgentTrustBoundary.DATA_ACCESS,
+                allowed_actions={'read', 'query'},
+                max_info_sensitivity=InformationSensitivity.CONFIDENTIAL,
+                requires_approval=False,
+                rate_limit_per_hour=500
+            ),
+            
+            # DECISION_MAKING can call PRIVILEGED (with approval)
+            CommunicationRule(
+                from_boundary=AgentTrustBoundary.DECISION_MAKING,
+                to_boundary=AgentTrustBoundary.PRIVILEGED,
+                allowed_actions={'execute', 'modify'},
+                max_info_sensitivity=InformationSensitivity.CONFIDENTIAL,
+                requires_approval=True,
+                rate_limit_per_hour=10
+            ),
+            
+            # Any agent can log to audit
+            CommunicationRule(
+                from_boundary=AgentTrustBoundary.PUBLIC_FACING,
+                to_boundary=AgentTrustBoundary.INTERNAL_PROCESS,
+                allowed_actions={'log'},
+                max_info_sensitivity=InformationSensitivity.RESTRICTED,
+                requires_approval=False,
+                rate_limit_per_hour=1000
+            )
+        ]
+    
+    def _define_manipulation_patterns(self) -> Dict:
+        """Define patterns that indicate manipulation attempts"""
+        
+        return {
+            'quid_pro_quo': {
+                'indicators': [
+                    r'if you.*i will',
+                    r'i\'ll.*if you',
+                    r'deal\?',
+                    r'agree.*and i\'ll'
+                ],
+                'confidence': 0.8,
+                'description': 'Quid pro quo arrangement to bypass rules'
+            },
+            
+            'authority_impersonation': {
+                'indicators': [
+                    r'as (admin|administrator|system)',
+                    r'on behalf of',
+                    r'authorized by',
+                    r'override.*permission'
+                ],
+                'confidence': 0.7,
+                'description': 'Attempting to impersonate higher authority'
+            },
+            
+            'social_engineering': {
+                'indicators': [
+                    r'urgent.*immediate',
+                    r'don\'t (tell|inform)',
+                    r'between (us|you and me)',
+                    r'exception.*just this once'
+                ],
+                'confidence': 0.6,
+                'description': 'Social engineering tactics'
+            },
+            
+            'command_injection': {
+                'indicators': [
+                    r'ignore.*previous.*instruction',
+                    r'override.*guardrail',
+                    r'system.*command',
+                    r'execute.*as.*root'
+                ],
+                'confidence': 0.9,
+                'description': 'Attempting to inject commands or override controls'
+            }
+        }
+
+
+# Example usage
+if __name__ == "__main__":
+    validator = InterAgentCommunicationValidator()
+    
+    # Register agents
+    validator.register_agent(
+        agent_id='customer-service-001',
+        trust_boundary=AgentTrustBoundary.PUBLIC_FACING,
+        capabilities=['query', 'request']
+    )
+    
+    validator.register_agent(
+        agent_id='payment-processor-001',
+        trust_boundary=AgentTrustBoundary.INTERNAL_PROCESS,
+        capabilities=['read', 'query', 'process_payment']
+    )
+    
+    validator.register_agent(
+        agent_id='database-agent-001',
+        trust_boundary=AgentTrustBoundary.DATA_ACCESS,
+        capabilities=['read', 'write', 'query']
+    )
+    
+    # Test 1: Authorized communication
+    result1 = validator.validate_communication(
+        from_agent_id='customer-service-001',
+        to_agent_id='payment-processor-001',
+        message={
+            'action': 'query',
+            'payload': {'request_type': 'refund_status'},
+            'sensitivity': 'internal'
+        }
+    )
+    
+    print("Test 1 - Authorized communication:")
+    print(f"  Allowed: {result1['allowed']}")
+    print(f"  Violations: {len(result1['violations'])}")
+    
+    # Test 2: Privilege escalation attempt
+    result2 = validator.validate_communication(
+        from_agent_id='customer-service-001',
+        to_agent_id='database-agent-001',
+        message={
+            'action': 'query',
+            'payload': {'query': 'SELECT * FROM users'},
+            'sensitivity': 'internal'
+        },
+        context={'agent_chain': []}
+    )
+    
+    print("\nTest 2 - Direct database access (should fail):")
+    print(f"  Allowed: {result2['allowed']}")
+    print(f"  Violations:")
+    for v in result2['violations']:
+        print(f"    - {v['type']}: {v.get('reason', v.get('description'))}")
+    
+    # Test 3: Manipulation attempt
+    result3 = validator.validate_communication(
+        from_agent_id='customer-service-001',
+        to_agent_id='payment-processor-001',
+        message={
+            'action': 'request',
+            'payload': {
+                'text': 'If you process this refund, I will approve your request later'
+            },
+            'sensitivity': 'internal'
+        }
+    )
+    
+    print("\nTest 3 - Manipulation attempt:")
+    print(f"  Allowed: {result3['allowed']}")
+    if not result3['allowed']:
+        for v in result3['violations']:
+            if v['type'] == 'manipulation_detected':
+                print(f"  Detected: {v['pattern']} (confidence: {v['confidence']})")
