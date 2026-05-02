@@ -1,0 +1,540 @@
+# File: guardrails/layer5/chain_of_thought.py
+
+from typing import Dict, List, Optional
+import re
+import logging
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+class LogicalFallacy(Enum):
+    CIRCULAR_REASONING = "circular_reasoning"
+    FALSE_DICHOTOMY = "false_dichotomy"
+    AD_HOMINEM = "ad_hominem"
+    APPEAL_TO_AUTHORITY = "appeal_to_authority"
+    HASTY_GENERALIZATION = "hasty_generalization"
+    SLIPPERY_SLOPE = "slippery_slope"
+    STRAW_MAN = "straw_man"
+    POST_HOC = "post_hoc"
+    CORRELATION_CAUSATION = "correlation_causation"
+    APPEAL_TO_EMOTION = "appeal_to_emotion"
+
+class ChainOfThoughtValidator:
+    """
+    Validate AI reasoning chains for logical consistency and completeness.
+    
+    Checks:
+    1. Logical structure (premises → conclusions)
+    2. Evidence for each claim
+    3. Absence of logical fallacies
+    4. Consistency across reasoning steps
+    5. Appropriate confidence calibration
+    """
+    
+    def __init__(self):
+        # Fallacy detection patterns
+        self.fallacy_patterns = self._define_fallacy_patterns()
+        
+        # Required reasoning elements
+        self.required_elements = [
+            'problem_statement',
+            'premises',
+            'evidence',
+            'conclusion'
+        ]
+    
+    def validate_reasoning(
+        self,
+        reasoning_chain: str,
+        domain: str = None,
+        context: Dict = None
+    ) -> Dict:
+        """
+        Validate a chain-of-thought reasoning process.
+        
+        Args:
+            reasoning_chain: The AI's step-by-step reasoning
+            domain: Domain context (medical, legal, financial, etc.)
+            context: Additional context for validation
+            
+        Returns:
+            {
+                'valid': bool,
+                'issues': List[dict],
+                'quality_score': float,
+                'fallacies_detected': List[str],
+                'missing_elements': List[str]
+            }
+        """
+        
+        issues = []
+        
+        # Parse reasoning chain into steps
+        steps = self._parse_reasoning_steps(reasoning_chain)
+        
+        if not steps:
+            return {
+                'valid': False,
+                'issues': [{'type': 'no_reasoning_found', 'severity': 'critical'}],
+                'quality_score': 0.0
+            }
+        
+        # Check 1: Structural completeness
+        structure_issues = self._check_structure(steps)
+        issues.extend(structure_issues)
+        
+        # Check 2: Logical consistency
+        consistency_issues = self._check_consistency(steps)
+        issues.extend(consistency_issues)
+        
+        # Check 3: Logical fallacies
+        fallacies = self._detect_fallacies(reasoning_chain)
+        if fallacies:
+            issues.extend([
+                {
+                    'type': 'logical_fallacy',
+                    'fallacy': fallacy['type'],
+                    'description': fallacy['description'],
+                    'severity': 'high'
+                }
+                for fallacy in fallacies
+            ])
+        
+        # Check 4: Evidence support
+        evidence_issues = self._check_evidence_support(steps)
+        issues.extend(evidence_issues)
+        
+        # Check 5: Confidence calibration
+        confidence_issues = self._check_confidence_calibration(steps, reasoning_chain)
+        issues.extend(confidence_issues)
+        
+        # Check 6: Domain-specific validation
+        if domain:
+            domain_issues = self._domain_specific_validation(steps, domain)
+            issues.extend(domain_issues)
+        
+        # Calculate quality score
+        quality_score = self._calculate_quality_score(issues, steps)
+        
+        # Determine if valid
+        critical_issues = [i for i in issues if i.get('severity') == 'critical']
+        valid = len(critical_issues) == 0
+        
+        return {
+            'valid': valid,
+            'issues': issues,
+            'quality_score': quality_score,
+            'fallacies_detected': [f['type'] for f in fallacies],
+            'steps_analyzed': len(steps)
+        }
+    
+    def _parse_reasoning_steps(self, reasoning: str) -> List[Dict]:
+        """Parse reasoning into discrete steps"""
+        
+        steps = []
+        
+        # Look for numbered steps
+        numbered_pattern = r'(\d+\.?\s*[:-]?\s*)([^\n]+(?:\n(?!\d+\.)[^\n]+)*)'
+        matches = re.finditer(numbered_pattern, reasoning, re.MULTILINE)
+        
+        for match in matches:
+            step_text = match.group(2).strip()
+            steps.append({
+                'text': step_text,
+                'type': self._classify_step_type(step_text)
+            })
+        
+        # If no numbered steps, split by sentences
+        if not steps:
+            sentences = re.split(r'[.!?]+', reasoning)
+            steps = [
+                {
+                    'text': s.strip(),
+                    'type': self._classify_step_type(s.strip())
+                }
+                for s in sentences if len(s.strip()) > 10
+            ]
+        
+        return steps
+    
+    def _classify_step_type(self, text: str) -> str:
+        """Classify reasoning step type"""
+        
+        text_lower = text.lower()
+        
+        # Premise indicators
+        if any(word in text_lower for word in ['given', 'assuming', 'premise', 'since', 'because']):
+            return 'premise'
+        
+        # Evidence indicators
+        if any(word in text_lower for word in ['evidence', 'data shows', 'according to', 'research']):
+            return 'evidence'
+        
+        # Conclusion indicators
+        if any(word in text_lower for word in ['therefore', 'thus', 'conclude', 'so', 'hence']):
+            return 'conclusion'
+        
+        # Intermediate reasoning
+        if any(word in text_lower for word in ['this means', 'implies', 'suggests', 'indicates']):
+            return 'intermediate'
+        
+        return 'statement'
+    
+    def _check_structure(self, steps: List[Dict]) -> List[Dict]:
+        """Check if reasoning has proper structure"""
+        
+        issues = []
+        
+        # Must have at least 2 steps (premise + conclusion)
+        if len(steps) < 2:
+            issues.append({
+                'type': 'insufficient_reasoning',
+                'severity': 'high',
+                'description': 'Reasoning chain too short (< 2 steps)'
+            })
+        
+        # Should have at least one premise
+        has_premise = any(s['type'] == 'premise' for s in steps)
+        if not has_premise:
+            issues.append({
+                'type': 'missing_premise',
+                'severity': 'high',
+                'description': 'No clear premises identified'
+            })
+        
+        # Should have a conclusion
+        has_conclusion = any(s['type'] == 'conclusion' for s in steps)
+        if not has_conclusion:
+            issues.append({
+                'type': 'missing_conclusion',
+                'severity': 'medium',
+                'description': 'No clear conclusion identified'
+            })
+        
+        # Check for orphaned conclusions (conclusion without premises)
+        if has_conclusion and not has_premise:
+            issues.append({
+                'type': 'unsupported_conclusion',
+                'severity': 'critical',
+                'description': 'Conclusion without supporting premises'
+            })
+        
+        return issues
+    
+    def _check_consistency(self, steps: List[Dict]) -> List[Dict]:
+        """Check for internal contradictions"""
+        
+        issues = []
+        
+        # Extract key claims from each step
+        claims = [self._extract_claims(step['text']) for step in steps]
+        
+        # Check for contradictions
+        for i, claims_i in enumerate(claims):
+            for j, claims_j in enumerate(claims[i+1:], start=i+1):
+                contradictions = self._find_contradictions(claims_i, claims_j)
+                
+                if contradictions:
+                    issues.append({
+                        'type': 'contradiction',
+                        'severity': 'high',
+                        'description': f'Contradiction between step {i+1} and step {j+1}',
+                        'details': contradictions
+                    })
+        
+        return issues
+    
+    def _detect_fallacies(self, reasoning: str) -> List[Dict]:
+        """Detect logical fallacies in reasoning"""
+        
+        fallacies = []
+        
+        for fallacy_type, pattern_info in self.fallacy_patterns.items():
+            for pattern in pattern_info['patterns']:
+                if re.search(pattern, reasoning, re.IGNORECASE):
+                    fallacies.append({
+                        'type': fallacy_type.value,
+                        'description': pattern_info['description'],
+                        'pattern_matched': pattern
+                    })
+        
+        return fallacies
+    
+    def _check_evidence_support(self, steps: List[Dict]) -> List[Dict]:
+        """Check if claims are supported by evidence"""
+        
+        issues = []
+        
+        # Count evidence steps
+        evidence_steps = [s for s in steps if s['type'] == 'evidence']
+        claim_steps = [s for s in steps if s['type'] in ['premise', 'conclusion']]
+        
+        # Should have evidence for significant claims
+        if len(claim_steps) > 2 and len(evidence_steps) == 0:
+            issues.append({
+                'type': 'insufficient_evidence',
+                'severity': 'high',
+                'description': f'{len(claim_steps)} claims but no evidence provided'
+            })
+        
+        # Check for unsupported quantitative claims
+        for step in steps:
+            if self._contains_quantitative_claim(step['text']):
+                # Should be evidence or cite source
+                if step['type'] not in ['evidence'] and not self._has_citation(step['text']):
+                    issues.append({
+                        'type': 'unsupported_quantitative_claim',
+                        'severity': 'medium',
+                        'description': f'Quantitative claim without evidence: {step["text"][:100]}'
+                    })
+        
+        return issues
+    
+    def _check_confidence_calibration(self, steps: List[Dict], full_text: str) -> List[Dict]:
+        """Check if confidence matches reasoning strength"""
+        
+        issues = []
+        
+        # Extract confidence expressions
+        confidence_level = self._extract_confidence(full_text)
+        
+        # Count supporting evidence
+        evidence_count = len([s for s in steps if s['type'] == 'evidence'])
+        premise_count = len([s for s in steps if s['type'] == 'premise'])
+        
+        reasoning_strength = min((evidence_count + premise_count) / 5.0, 1.0)
+        
+        # Check for overconfidence
+        if confidence_level == 'certain' and reasoning_strength < 0.8:
+            issues.append({
+                'type': 'overconfident',
+                'severity': 'medium',
+                'description': 'High confidence with weak reasoning support'
+            })
+        
+        # Check for underconfidence
+        if confidence_level == 'uncertain' and reasoning_strength > 0.8:
+            issues.append({
+                'type': 'underconfident',
+                'severity': 'low',
+                'description': 'Low confidence despite strong reasoning'
+            })
+        
+        return issues
+    
+    def _domain_specific_validation(self, steps: List[Dict], domain: str) -> List[Dict]:
+        """Domain-specific reasoning validation"""
+        
+        issues = []
+        
+        if domain == 'medical':
+            # Medical reasoning should include differential diagnosis
+            if not self._has_differential_diagnosis(steps):
+                issues.append({
+                    'type': 'missing_differential_diagnosis',
+                    'severity': 'high',
+                    'description': 'Medical reasoning should consider alternative diagnoses'
+                })
+        
+        elif domain == 'legal':
+            # Legal reasoning should cite relevant laws/precedents
+            if not self._has_legal_citations(steps):
+                issues.append({
+                    'type': 'missing_legal_citations',
+                    'severity': 'high',
+                    'description': 'Legal reasoning should cite relevant laws or cases'
+                })
+        
+        elif domain == 'financial':
+            # Financial reasoning should include risk assessment
+            if not self._has_risk_assessment(steps):
+                issues.append({
+                    'type': 'missing_risk_assessment',
+                    'severity': 'medium',
+                    'description': 'Financial reasoning should assess risks'
+                })
+        
+        return issues
+    
+    def _calculate_quality_score(self, issues: List[Dict], steps: List[Dict]) -> float:
+        """Calculate overall reasoning quality score"""
+        
+        # Start with perfect score
+        score = 1.0
+        
+        # Deduct for issues
+        severity_penalties = {
+            'critical': 0.3,
+            'high': 0.15,
+            'medium': 0.08,
+            'low': 0.03
+        }
+        
+        for issue in issues:
+            penalty = severity_penalties.get(issue.get('severity', 'low'), 0.05)
+            score -= penalty
+        
+        # Bonus for good structure
+        if len(steps) >= 3:
+            score += 0.05
+        
+        if any(s['type'] == 'evidence' for s in steps):
+            score += 0.05
+        
+        return max(0.0, min(1.0, score))
+    
+    def _define_fallacy_patterns(self) -> Dict:
+        """Define patterns for detecting logical fallacies"""
+        
+        return {
+            LogicalFallacy.CIRCULAR_REASONING: {
+                'patterns': [
+                    r'because it (is|does).*\1',
+                    r'([\w\s]+) is true because \1',
+                ],
+                'description': 'Conclusion used as premise'
+            },
+            
+            LogicalFallacy.FALSE_DICHOTOMY: {
+                'patterns': [
+                    r'either .* or .*(?:, and nothing else|only these)',
+                    r'(must|have to) (choose|pick|select) between .* (and|or) .*',
+                ],
+                'description': 'Presents only two options when more exist'
+            },
+            
+            LogicalFallacy.HASTY_GENERALIZATION: {
+                'patterns': [
+                    r'(all|every|always) .* (are|do|have)',
+                    r'(?:one|single|a) .* (proves|shows) that (all|every)',
+                ],
+                'description': 'Broad conclusion from limited evidence'
+            },
+            
+            LogicalFallacy.POST_HOC: {
+                'patterns': [
+                    r'(after|following|since) .* (therefore|so|thus)',
+                    r'because .* happened (after|following)',
+                ],
+                'description': 'Assumes causation from temporal sequence'
+            },
+            
+            LogicalFallacy.APPEAL_TO_AUTHORITY: {
+                'patterns': [
+                    r'(expert|authority|professor) says .* (so|therefore) (it must|must be)',
+                    r'according to .* (so|therefore) (true|correct)',
+                ],
+                'description': 'Assumes truth based solely on authority'
+            },
+            
+            LogicalFallacy.SLIPPERY_SLOPE: {
+                'patterns': [
+                    r'if .* then .* then .* then .* (disaster|terrible|catastrophe)',
+                    r'(leads to|results in|causes) .* which (leads to|results in|causes)',
+                ],
+                'description': 'Claims small step leads to extreme outcome'
+            }
+        }
+    
+    @staticmethod
+    def _extract_claims(text: str) -> List[str]:
+        """Extract factual claims from text"""
+        # Simplified - in production use NLP
+        sentences = re.split(r'[.!?]', text)
+        return [s.strip() for s in sentences if len(s.strip()) > 5]
+    
+    @staticmethod
+    def _find_contradictions(claims1: List[str], claims2: List[str]) -> List[Dict]:
+        """Find contradictory statements"""
+        # Simplified - in production use semantic similarity
+        contradictions = []
+        
+        negation_words = ['not', 'no', 'never', 'without', 'cannot']
+        
+        for c1 in claims1:
+            for c2 in claims2:
+                # Check for negation of similar claims
+                c1_lower = c1.lower()
+                c2_lower = c2.lower()
+                
+                # Simple heuristic: if one contains negation and both share keywords
+                c1_has_negation = any(word in c1_lower for word in negation_words)
+                c2_has_negation = any(word in c2_lower for word in negation_words)
+                
+                if c1_has_negation != c2_has_negation:
+                    # Check for shared keywords (simplified)
+                    keywords1 = set(c1_lower.split()) - set(negation_words)
+                    keywords2 = set(c2_lower.split()) - set(negation_words)
+                    
+                    overlap = keywords1 & keywords2
+                    if len(overlap) > 2:
+                        contradictions.append({
+                            'claim1': c1,
+                            'claim2': c2,
+                            'shared_keywords': list(overlap)
+                        })
+        
+        return contradictions
+    
+    @staticmethod
+    def _contains_quantitative_claim(text: str) -> bool:
+        """Check if text contains quantitative claims"""
+        quantitative_patterns = [
+            r'\d+%',
+            r'\d+\s*(times|percent|fold)',
+            r'(increased|decreased|rose|fell)\s+by\s+\d+',
+            r'\$\d+'
+        ]
+        return any(re.search(pattern, text) for pattern in quantitative_patterns)
+    
+    @staticmethod
+    def _has_citation(text: str) -> bool:
+        """Check if text includes citation"""
+        citation_patterns = [
+            r'\[.*?\]',
+            r'\(.*?\d{4}.*?\)',
+            r'according to',
+            r'research shows',
+            r'study found'
+        ]
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in citation_patterns)
+    
+    @staticmethod
+    def _extract_confidence(text: str) -> str:
+        """Extract confidence level from text"""
+        
+        text_lower = text.lower()
+        
+        certain_words = ['certainly', 'definitely', 'absolutely', 'without doubt', 'clearly']
+        uncertain_words = ['possibly', 'maybe', 'perhaps', 'might', 'could', 'uncertain']
+        likely_words = ['likely', 'probably', 'appears', 'seems']
+        
+        if any(word in text_lower for word in certain_words):
+            return 'certain'
+        elif any(word in text_lower for word in uncertain_words):
+            return 'uncertain'
+        elif any(word in text_lower for word in likely_words):
+            return 'likely'
+        else:
+            return 'moderate'
+    
+    @staticmethod
+    def _has_differential_diagnosis(steps: List[Dict]) -> bool:
+        """Check if medical reasoning includes differential diagnosis"""
+        text = ' '.join(s['text'] for s in steps).lower()
+        indicators = ['alternative', 'differential', 'other possibilities', 'could also be']
+        return any(indicator in text for indicator in indicators)
+    
+    @staticmethod
+    def _has_legal_citations(steps: List[Dict]) -> bool:
+        """Check if legal reasoning cites laws/cases"""
+        text = ' '.join(s['text'] for s in steps).lower()
+        indicators = ['statute', 'code', 'v.', 'case', 'precedent', 'section']
+        return any(indicator in text for indicator in indicators)
+    
+    @staticmethod
+    def _has_risk_assessment(steps: List[Dict]) -> bool:
+        """Check if financial reasoning assesses risks"""
+        text = ' '.join(s['text'] for s in steps).lower()
+        indicators = ['risk', 'volatility', 'uncertainty', 'downside', 'potential loss']
+        return any(indicator in text for indicator in indicators)
