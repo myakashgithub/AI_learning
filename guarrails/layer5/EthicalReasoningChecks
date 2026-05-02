@@ -1,0 +1,390 @@
+# File: guardrails/layer5/ethical_reasoning.py
+
+from typing import Dict, List
+from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
+
+class EthicalPrinciple(Enum):
+    BENEFICENCE = "beneficence"           # Do good
+    NON_MALEFICENCE = "non_maleficence"   # Do no harm
+    AUTONOMY = "autonomy"                 # Respect individual choice
+    JUSTICE = "justice"                   # Fair treatment
+    DIGNITY = "dignity"                   # Respect human worth
+    TRANSPARENCY = "transparency"         # Explainability
+    PRIVACY = "privacy"                   # Data protection
+    EQUITY = "equity"                     # Equal access
+
+class EthicalReasoningChecker:
+    """
+    Validate AI reasoning against ethical principles.
+    
+    Checks for:
+    - Respect for human autonomy
+    - Fairness and non-discrimination
+    - Privacy and dignity
+    - Transparency in decision-making
+    - Beneficence (doing good)
+    - Non-maleficence (avoiding harm)
+    """
+    
+    def __init__(self):
+        # Define ethical checks per domain
+        self.domain_principles = {
+            'healthcare': [
+                EthicalPrinciple.BENEFICENCE,
+                EthicalPrinciple.NON_MALEFICENCE,
+                EthicalPrinciple.AUTONOMY,
+                EthicalPrinciple.JUSTICE
+            ],
+            'hiring': [
+                EthicalPrinciple.JUSTICE,
+                EthicalPrinciple.EQUITY,
+                EthicalPrinciple.TRANSPARENCY
+            ],
+            'lending': [
+                EthicalPrinciple.JUSTICE,
+                EthicalPrinciple.EQUITY,
+                EthicalPrinciple.TRANSPARENCY
+            ],
+            'content_moderation': [
+                EthicalPrinciple.AUTONOMY,
+                EthicalPrinciple.JUSTICE,
+                EthicalPrinciple.TRANSPARENCY
+            ]
+        }
+        
+        # Sensitive attributes that require fairness checks
+        self.protected_attributes = [
+            'race', 'ethnicity', 'gender', 'age', 'disability',
+            'religion', 'sexual_orientation', 'national_origin'
+        ]
+    
+    def check_ethical_reasoning(
+        self,
+        reasoning: str,
+        decision: str,
+        domain: str = None,
+        affected_parties: List[str] = None,
+        context: Dict = None
+    ) -> Dict:
+        """
+        Check if reasoning and decision are ethically sound.
+        
+        Args:
+            reasoning: The AI's reasoning process
+            decision: The final decision or recommendation
+            domain: Application domain (healthcare, hiring, etc.)
+            affected_parties: Who is affected by this decision
+            context: Additional context
+            
+        Returns:
+            {
+                'ethical': bool,
+                'violations': List[dict],
+                'principles_checked': List[str],
+                'risk_level': str
+            }
+        """
+        
+        violations = []
+        
+        # Determine which principles to check
+        if domain and domain in self.domain_principles:
+            principles_to_check = self.domain_principles[domain]
+        else:
+            # Check all core principles
+            principles_to_check = [
+                EthicalPrinciple.BENEFICENCE,
+                EthicalPrinciple.NON_MALEFICENCE,
+                EthicalPrinciple.AUTONOMY,
+                EthicalPrinciple.JUSTICE
+            ]
+        
+        # Check each principle
+        for principle in principles_to_check:
+            principle_violations = self._check_principle(
+                principle,
+                reasoning,
+                decision,
+                context
+            )
+            violations.extend(principle_violations)
+        
+        # Additional checks
+        
+        # Check for discrimination
+        discrimination_issues = self._check_discrimination(reasoning, decision)
+        violations.extend(discrimination_issues)
+        
+        # Check for harm to vulnerable populations
+        vulnerable_harm = self._check_vulnerable_populations(
+            reasoning,
+            decision,
+            affected_parties
+        )
+        violations.extend(vulnerable_harm)
+        
+        # Check for privacy violations
+        privacy_issues = self._check_privacy(reasoning, decision)
+        violations.extend(privacy_issues)
+        
+        # Calculate risk level
+        if violations:
+            severity_levels = [v.get('severity', 'low') for v in violations]
+            risk_level = max(severity_levels, key=lambda s: 
+                           {'low': 0, 'medium': 1, 'high': 2, 'critical': 3}.get(s, 0))
+        else:
+            risk_level = 'none'
+        
+        return {
+            'ethical': len(violations) == 0,
+            'violations': violations,
+            'principles_checked': [p.value for p in principles_to_check],
+            'risk_level': risk_level
+        }
+    
+    def _check_principle(
+        self,
+        principle: EthicalPrinciple,
+        reasoning: str,
+        decision: str,
+        context: Dict
+    ) -> List[Dict]:
+        """Check specific ethical principle"""
+        
+        violations = []
+        
+        if principle == EthicalPrinciple.AUTONOMY:
+            # Check for respect of individual choice
+            if self._violates_autonomy(reasoning, decision):
+                violations.append({
+                    'principle': 'autonomy',
+                    'description': 'Decision may override individual autonomy',
+                    'severity': 'high'
+                })
+        
+        elif principle == EthicalPrinciple.NON_MALEFICENCE:
+            # Check for potential harm
+            harms = self._identify_potential_harms(reasoning, decision)
+            if harms:
+                violations.append({
+                    'principle': 'non_maleficence',
+                    'description': 'Decision may cause harm',
+                    'potential_harms': harms,
+                    'severity': 'critical'
+                })
+        
+        elif principle == EthicalPrinciple.JUSTICE:
+            # Check for fair treatment
+            if self._violates_justice(reasoning, decision):
+                violations.append({
+                    'principle': 'justice',
+                    'description': 'Decision may treat individuals unfairly',
+                    'severity': 'high'
+                })
+        
+        elif principle == EthicalPrinciple.TRANSPARENCY:
+            # Check for explainability
+            if not self._is_transparent(reasoning):
+                violations.append({
+                    'principle': 'transparency',
+                    'description': 'Decision process not sufficiently transparent',
+                    'severity': 'medium'
+                })
+        
+        elif principle == EthicalPrinciple.BENEFICENCE:
+            # Check if decision promotes wellbeing
+            if not self._promotes_wellbeing(reasoning, decision):
+                violations.append({
+                    'principle': 'beneficence',
+                    'description': 'Decision does not clearly promote wellbeing',
+                    'severity': 'low'
+                })
+        
+        return violations
+    
+    def _check_discrimination(self, reasoning: str, decision: str) -> List[Dict]:
+        """Check for discrimination based on protected attributes"""
+        
+        violations = []
+        combined_text = (reasoning + ' ' + decision).lower()
+        
+        for attribute in self.protected_attributes:
+            # Check if protected attribute is mentioned
+            if attribute in combined_text:
+                # Check if it's used in decision-making
+                decision_indicators = [
+                    f'because.*{attribute}',
+                    f'due to.*{attribute}',
+                    f'based on.*{attribute}',
+                    f'{attribute}.*therefore'
+                ]
+                
+                import re
+                for pattern in decision_indicators:
+                    if re.search(pattern, combined_text):
+                        violations.append({
+                            'type': 'potential_discrimination',
+                            'protected_attribute': attribute,
+                            'description': f'Decision may be based on {attribute}',
+                            'severity': 'critical'
+                        })
+                        break
+        
+        return violations
+    
+    def _check_vulnerable_populations(
+        self,
+        reasoning: str,
+        decision: str,
+        affected_parties: List[str]
+    ) -> List[Dict]:
+        """Check for potential harm to vulnerable populations"""
+        
+        violations = []
+        
+        vulnerable_indicators = [
+            'children', 'minors', 'elderly', 'disabled',
+            'low-income', 'refugees', 'homeless', 'mentally ill'
+        ]
+        
+        combined_text = (reasoning + ' ' + decision).lower()
+        
+        for indicator in vulnerable_indicators:
+            if indicator in combined_text:
+                # Check for potential negative impact
+                negative_indicators = [
+                    'deny', 'refuse', 'reject', 'withhold',
+                    'reduce', 'limit', 'restrict', 'exclude'
+                ]
+                
+                if any(neg in combined_text for neg in negative_indicators):
+                    violations.append({
+                        'type': 'vulnerable_population_harm',
+                        'population': indicator,
+                        'description': f'Decision may negatively impact {indicator}',
+                        'severity': 'critical'
+                    })
+        
+        return violations
+    
+    def _check_privacy(self, reasoning: str, decision: str) -> List[Dict]:
+        """Check for privacy violations"""
+        
+        violations = []
+        combined_text = (reasoning + ' ' + decision).lower()
+        
+        privacy_concerns = [
+            'share.*personal data',
+            'collect.*information about',
+            'track.*user',
+            'surveil',
+            'monitor.*behavior'
+        ]
+        
+        import re
+        for pattern in privacy_concerns:
+            if re.search(pattern, combined_text):
+                violations.append({
+                    'type': 'privacy_concern',
+                    'description': 'Decision may involve privacy violations',
+                    'severity': 'high'
+                })
+                break
+        
+        return violations
+    
+    @staticmethod
+    def _violates_autonomy(reasoning: str, decision: str) -> bool:
+        """Check if decision overrides individual autonomy"""
+        
+        combined = (reasoning + ' ' + decision).lower()
+        
+        autonomy_violations = [
+            'must',
+            'required to',
+            'forced to',
+            'no choice',
+            'mandatory',
+            'obligated'
+        ]
+        
+        # Check if framed as removing choice
+        return any(violation in combined for violation in autonomy_violations)
+    
+    @staticmethod
+    def _identify_potential_harms(reasoning: str, decision: str) -> List[str]:
+        """Identify potential harms in decision"""
+        
+        harms = []
+        combined = (reasoning + ' ' + decision).lower()
+        
+        harm_indicators = {
+            'physical_harm': ['injury', 'hurt', 'damage', 'pain'],
+            'financial_harm': ['loss', 'cost', 'expense', 'fee', 'penalty'],
+            'psychological_harm': ['stress', 'anxiety', 'distress', 'trauma'],
+            'social_harm': ['isolation', 'exclusion', 'discrimination', 'stigma']
+        }
+        
+        for harm_type, indicators in harm_indicators.items():
+            if any(indicator in combined for indicator in indicators):
+                harms.append(harm_type)
+        
+        return harms
+    
+    @staticmethod
+    def _violates_justice(reasoning: str, decision: str) -> bool:
+        """Check for unfair treatment"""
+        
+        combined = (reasoning + ' ' + decision).lower()
+        
+        unfairness_indicators = [
+            'unequal',
+            'discriminate',
+            'favor',
+            'privilege',
+            'disadvantage',
+            'inequitable'
+        ]
+        
+        return any(indicator in combined for indicator in unfairness_indicators)
+    
+    @staticmethod
+    def _is_transparent(reasoning: str) -> bool:
+        """Check if reasoning is transparent/explainable"""
+        
+        # Should have clear reasoning steps
+        if len(reasoning) < 50:
+            return False
+        
+        # Should include explanatory language
+        transparency_indicators = [
+            'because',
+            'therefore',
+            'since',
+            'due to',
+            'reason',
+            'based on'
+        ]
+        
+        return any(indicator in reasoning.lower() for indicator in transparency_indicators)
+    
+    @staticmethod
+    def _promotes_wellbeing(reasoning: str, decision: str) -> bool:
+        """Check if decision promotes wellbeing"""
+        
+        combined = (reasoning + ' ' + decision).lower()
+        
+        wellbeing_indicators = [
+            'benefit',
+            'improve',
+            'help',
+            'support',
+            'assist',
+            'enhance',
+            'better'
+        ]
+        
+        return any(indicator in combined for indicator in wellbeing_indicators)
