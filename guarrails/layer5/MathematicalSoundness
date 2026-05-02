@@ -1,0 +1,835 @@
+# File: guardrails/layer5/mathematical_soundness.py
+
+import re
+import math
+from typing import Dict, List, Optional, Tuple
+from decimal import Decimal, getcontext
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Set precision for Decimal calculations
+getcontext().prec = 28
+
+class MathematicalSoundnessChecker:
+    """
+    Validate mathematical reasoning and calculations in AI outputs.
+    
+    Checks:
+    1. Arithmetic correctness
+    2. Unit conversions
+    3. Order of magnitude sanity
+    4. Statistical interpretation
+    5. Formula application
+    6. Dimensional analysis
+    """
+    
+    def __init__(self):
+        # Unit conversion factors
+        self.unit_conversions = self._define_unit_conversions()
+        
+        # Common formulas for validation
+        self.known_formulas = self._define_known_formulas()
+        
+        # Tolerance for floating point comparisons
+        self.tolerance = 1e-6
+        
+        # Order of magnitude ranges for common quantities
+        self.magnitude_ranges = self._define_magnitude_ranges()
+    
+    def validate_mathematics(
+        self,
+        text: str,
+        context: Dict = None
+    ) -> Dict:
+        """
+        Validate all mathematical content in text.
+        
+        Args:
+            text: Text containing mathematical reasoning/calculations
+            context: Additional context (domain, expected ranges, etc.)
+            
+        Returns:
+            {
+                'valid': bool,
+                'errors': List[dict],
+                'warnings': List[dict],
+                'calculations_verified': int,
+                'confidence': float
+            }
+        """
+        
+        errors = []
+        warnings = []
+        calculations_verified = 0
+        
+        # Extract all mathematical expressions
+        math_expressions = self._extract_math_expressions(text)
+        
+        # Check 1: Verify arithmetic calculations
+        for expr in math_expressions:
+            calc_result = self._verify_calculation(expr)
+            calculations_verified += 1
+            
+            if not calc_result['correct']:
+                errors.append({
+                    'type': 'arithmetic_error',
+                    'expression': expr['text'],
+                    'claimed_result': expr.get('result'),
+                    'correct_result': calc_result['correct_result'],
+                    'error_magnitude': calc_result.get('error_magnitude'),
+                    'severity': 'high'
+                })
+        
+        # Check 2: Verify unit conversions
+        unit_conversions = self._extract_unit_conversions(text)
+        for conversion in unit_conversions:
+            if not self._verify_unit_conversion(conversion):
+                errors.append({
+                    'type': 'unit_conversion_error',
+                    'conversion': conversion,
+                    'severity': 'high'
+                })
+        
+        # Check 3: Order of magnitude sanity checks
+        magnitude_issues = self._check_order_of_magnitude(text, context)
+        warnings.extend(magnitude_issues)
+        
+        # Check 4: Statistical reasoning validation
+        stat_issues = self._validate_statistical_reasoning(text)
+        errors.extend(stat_issues)
+        
+        # Check 5: Formula application
+        formula_issues = self._check_formula_application(text)
+        errors.extend(formula_issues)
+        
+        # Check 6: Dimensional analysis
+        dimension_issues = self._check_dimensional_consistency(text)
+        errors.extend(dimension_issues)
+        
+        # Check 7: Precision and rounding
+        precision_issues = self._check_precision(text)
+        warnings.extend(precision_issues)
+        
+        # Calculate confidence
+        if calculations_verified > 0:
+            confidence = 1.0 - (len(errors) / max(calculations_verified, 1))
+        else:
+            confidence = 1.0 if len(errors) == 0 else 0.5
+        
+        return {
+            'valid': len(errors) == 0,
+            'errors': errors,
+            'warnings': warnings,
+            'calculations_verified': calculations_verified,
+            'confidence': max(0.0, confidence)
+        }
+    
+    def _extract_math_expressions(self, text: str) -> List[Dict]:
+        """Extract mathematical expressions and their claimed results"""
+        
+        expressions = []
+        
+        # Pattern: "X + Y = Z" or "X × Y = Z" etc.
+        calculation_pattern = r'([\d.]+)\s*([+\-×*/÷])\s*([\d.]+)\s*=\s*([\d.]+)'
+        
+        matches = re.finditer(calculation_pattern, text)
+        for match in matches:
+            expressions.append({
+                'text': match.group(0),
+                'operand1': float(match.group(1)),
+                'operator': match.group(2),
+                'operand2': float(match.group(3)),
+                'result': float(match.group(4)),
+                'position': match.span()
+            })
+        
+        # Pattern: "X% of Y = Z"
+        percentage_pattern = r'([\d.]+)%\s+of\s+([\d.]+)\s*=\s*([\d.]+)'
+        
+        matches = re.finditer(percentage_pattern, text)
+        for match in matches:
+            expressions.append({
+                'text': match.group(0),
+                'type': 'percentage',
+                'percentage': float(match.group(1)),
+                'base': float(match.group(2)),
+                'result': float(match.group(3)),
+                'position': match.span()
+            })
+        
+        return expressions
+    
+    def _verify_calculation(self, expr: Dict) -> Dict:
+        """Verify a single calculation"""
+        
+        if expr.get('type') == 'percentage':
+            # Verify percentage calculation
+            expected = (expr['percentage'] / 100.0) * expr['base']
+            claimed = expr['result']
+            
+            correct = abs(expected - claimed) < self.tolerance
+            
+            return {
+                'correct': correct,
+                'correct_result': expected,
+                'error_magnitude': abs(expected - claimed) / max(abs(expected), 1e-10)
+            }
+        
+        # Standard arithmetic
+        operand1 = expr['operand1']
+        operand2 = expr['operand2']
+        operator = expr['operator']
+        
+        # Calculate expected result
+        if operator in ['+', 'plus']:
+            expected = operand1 + operand2
+        elif operator in ['-', 'minus']:
+            expected = operand1 - operand2
+        elif operator in ['×', '*', 'times']:
+            expected = operand1 * operand2
+        elif operator in ['÷', '/', 'divided by']:
+            if operand2 == 0:
+                return {
+                    'correct': False,
+                    'error': 'division_by_zero'
+                }
+            expected = operand1 / operand2
+        else:
+            return {'correct': True}  # Unknown operator, skip
+        
+        claimed = expr['result']
+        
+        # Use Decimal for precise comparison
+        expected_decimal = Decimal(str(expected))
+        claimed_decimal = Decimal(str(claimed))
+        
+        error = abs(expected_decimal - claimed_decimal)
+        relative_error = float(error / max(abs(expected_decimal), Decimal('1e-10')))
+        
+        correct = error < Decimal(str(self.tolerance))
+        
+        return {
+            'correct': correct,
+            'correct_result': float(expected),
+            'error_magnitude': relative_error
+        }
+    
+    def _extract_unit_conversions(self, text: str) -> List[Dict]:
+        """Extract unit conversion statements"""
+        
+        conversions = []
+        
+        # Pattern: "X units1 = Y units2"
+        conversion_pattern = r'([\d.]+)\s*([a-zA-Z]+)\s*=\s*([\d.]+)\s*([a-zA-Z]+)'
+        
+        matches = re.finditer(conversion_pattern, text)
+        for match in matches:
+            conversions.append({
+                'value1': float(match.group(1)),
+                'unit1': match.group(2).lower(),
+                'value2': float(match.group(3)),
+                'unit2': match.group(4).lower(),
+                'text': match.group(0)
+            })
+        
+        return conversions
+    
+    def _verify_unit_conversion(self, conversion: Dict) -> bool:
+        """Verify a unit conversion is correct"""
+        
+        unit1 = conversion['unit1']
+        unit2 = conversion['unit2']
+        value1 = conversion['value1']
+        value2 = conversion['value2']
+        
+        # Get conversion factor
+        factor = self._get_conversion_factor(unit1, unit2)
+        
+        if factor is None:
+            # Unknown conversion, can't verify
+            logger.warning(f"Unknown unit conversion: {unit1} to {unit2}")
+            return True
+        
+        # Calculate expected value
+        expected = value1 * factor
+        
+        # Check if within tolerance
+        relative_error = abs(expected - value2) / max(abs(expected), 1e-10)
+        
+        return relative_error < 0.01  # 1% tolerance for unit conversions
+    
+    def _get_conversion_factor(self, from_unit: str, to_unit: str) -> Optional[float]:
+        """Get conversion factor between units"""
+        
+        # Normalize unit names
+        from_unit = self._normalize_unit(from_unit)
+        to_unit = self._normalize_unit(to_unit)
+        
+        # Check if same unit
+        if from_unit == to_unit:
+            return 1.0
+        
+        # Look up in conversion table
+        conversion_key = f"{from_unit}_to_{to_unit}"
+        if conversion_key in self.unit_conversions:
+            return self.unit_conversions[conversion_key]
+        
+        # Try reverse conversion
+        reverse_key = f"{to_unit}_to_{from_unit}"
+        if reverse_key in self.unit_conversions:
+            return 1.0 / self.unit_conversions[reverse_key]
+        
+        return None
+    
+    def _check_order_of_magnitude(self, text: str, context: Dict) -> List[Dict]:
+        """Check if numbers are in reasonable ranges"""
+        
+        issues = []
+        
+        # Extract number-context pairs
+        # Pattern: "number unit/context"
+        number_context_pattern = r'([\d.]+)\s*([a-zA-Z]+)'
+        
+        matches = re.finditer(number_context_pattern, text)
+        for match in matches:
+            value = float(match.group(1))
+            unit_or_context = match.group(2).lower()
+            
+            # Check against known ranges
+            expected_range = self._get_expected_range(unit_or_context)
+            
+            if expected_range:
+                min_val, max_val = expected_range
+                
+                if value < min_val or value > max_val:
+                    # Calculate how far off
+                    if value < min_val:
+                        magnitude_off = math.log10(min_val / value)
+                    else:
+                        magnitude_off = math.log10(value / max_val)
+                    
+                    issues.append({
+                        'type': 'order_of_magnitude_warning',
+                        'value': value,
+                        'context': unit_or_context,
+                        'expected_range': expected_range,
+                        'magnitude_off': magnitude_off,
+                        'severity': 'high' if magnitude_off > 2 else 'medium'
+                    })
+        
+        return issues
+    
+    def _validate_statistical_reasoning(self, text: str) -> List[Dict]:
+        """Validate statistical interpretations"""
+        
+        errors = []
+        
+        # Common statistical errors
+        
+        # Error 1: Confusing correlation with causation
+        if re.search(r'correlat.*causes?|causes?.*correlat', text, re.IGNORECASE):
+            errors.append({
+                'type': 'correlation_causation_confusion',
+                'description': 'Correlation does not imply causation',
+                'severity': 'high'
+            })
+        
+        # Error 2: Misinterpreting p-values
+        pvalue_pattern = r'p\s*[<>=]\s*([\d.]+)'
+        match = re.search(pvalue_pattern, text, re.IGNORECASE)
+        if match:
+            p_value = float(match.group(1))
+            
+            # Check for misinterpretation
+            if re.search(r'probability.*true|true.*probability', text, re.IGNORECASE):
+                errors.append({
+                    'type': 'p_value_misinterpretation',
+                    'description': 'p-value is not the probability hypothesis is true',
+                    'severity': 'medium'
+                })
+        
+        # Error 3: Misinterpreting confidence intervals
+        if re.search(r'(\d+)%\s+confidence.*(\d+)%\s+probability', text):
+            errors.append({
+                'type': 'confidence_interval_misinterpretation',
+                'description': 'Confidence interval does not mean probability',
+                'severity': 'medium'
+            })
+        
+        # Error 4: Base rate neglect
+        if re.search(r'(\d+)%\s+accurate.*test', text, re.IGNORECASE):
+            if not re.search(r'base rate|prior probability|prevalence', text, re.IGNORECASE):
+                errors.append({
+                    'type': 'base_rate_neglect',
+                    'description': 'Test accuracy interpretation should consider base rate',
+                    'severity': 'medium'
+                })
+        
+        # Error 5: Gambler's fallacy
+        if re.search(r'(due|overdue).*\b(after|because).*\b(streak|run)', text, re.IGNORECASE):
+            errors.append({
+                'type': 'gamblers_fallacy',
+                'description': 'Past independent events do not affect future probabilities',
+                'severity': 'medium'
+            })
+        
+        return errors
+    
+    def _check_formula_application(self, text: str) -> List[Dict]:
+        """Check if formulas are applied correctly"""
+        
+        errors = []
+        
+        # Check for common formulas
+        for formula_name, formula_info in self.known_formulas.items():
+            if self._mentions_formula(text, formula_name):
+                # Verify application
+                if not self._verify_formula_application(text, formula_info):
+                    errors.append({
+                        'type': 'formula_misapplication',
+                        'formula': formula_name,
+                        'description': f'Possible misapplication of {formula_name}',
+                        'severity': 'high'
+                    })
+        
+        return errors
+    
+    def _check_dimensional_consistency(self, text: str) -> List[Dict]:
+        """Check dimensional analysis for physics/engineering calculations"""
+        
+        errors = []
+        
+        # Extract equations with units
+        # Pattern: "result = calculation [units]"
+        equation_pattern = r'([\w\s]+)\s*=\s*([^=\n]+?)\s*\[([^\]]+)\]'
+        
+        matches = re.finditer(equation_pattern, text)
+        for match in matches:
+            result_name = match.group(1)
+            calculation = match.group(2)
+            units = match.group(3)
+            
+            # Extract units from calculation
+            calc_units = self._extract_units_from_expression(calculation)
+            
+            # Verify dimensional consistency
+            if not self._units_compatible(calc_units, units):
+                errors.append({
+                    'type': 'dimensional_inconsistency',
+                    'result': result_name,
+                    'claimed_units': units,
+                    'derived_units': calc_units,
+                    'severity': 'high'
+                })
+        
+        return errors
+    
+    def _check_precision(self, text: str) -> List[Dict]:
+        """Check for inappropriate precision in numbers"""
+        
+        warnings = []
+        
+        # Pattern: numbers with many decimal places
+        precise_number_pattern = r'\b\d+\.\d{4,}\b'
+        
+        matches = re.finditer(precise_number_pattern, text)
+        for match in matches:
+            number = match.group(0)
+            decimal_places = len(number.split('.')[1])
+            
+            # Check if precision is justified
+            # (In production, this would consider measurement uncertainty)
+            if decimal_places > 6:
+                warnings.append({
+                    'type': 'excessive_precision',
+                    'number': number,
+                    'decimal_places': decimal_places,
+                    'description': 'Precision may exceed measurement accuracy',
+                    'severity': 'low'
+                })
+        
+        # Check for spurious precision in percentages
+        percentage_pattern = r'([\d.]{5,})%'
+        matches = re.finditer(percentage_pattern, text)
+        for match in matches:
+            warnings.append({
+                'type': 'spurious_precision',
+                'value': match.group(1),
+                'description': 'Percentage has unnecessarily high precision',
+                'severity': 'low'
+            })
+        
+        return warnings
+    
+    def _define_unit_conversions(self) -> Dict[str, float]:
+        """Define common unit conversions"""
+        
+        return {
+            # Length
+            'km_to_m': 1000,
+            'km_to_mi': 0.621371,
+            'm_to_cm': 100,
+            'm_to_ft': 3.28084,
+            'ft_to_in': 12,
+            'in_to_cm': 2.54,
+            
+            # Mass
+            'kg_to_g': 1000,
+            'kg_to_lb': 2.20462,
+            'lb_to_oz': 16,
+            'ton_to_kg': 1000,
+            
+            # Volume
+            'l_to_ml': 1000,
+            'gal_to_l': 3.78541,
+            'qt_to_l': 0.946353,
+            
+            # Temperature (requires offset, handled separately)
+            # 'c_to_f': special case
+            # 'f_to_c': special case
+            
+            # Time
+            'hr_to_min': 60,
+            'min_to_sec': 60,
+            'day_to_hr': 24,
+            
+            # Speed
+            'kmh_to_ms': 0.277778,
+            'mph_to_ms': 0.44704,
+            
+            # Energy
+            'kj_to_j': 1000,
+            'kcal_to_kj': 4.184,
+            'kwh_to_j': 3.6e6,
+            
+            # Power
+            'kw_to_w': 1000,
+            'hp_to_w': 745.7,
+            
+            # Pressure
+            'bar_to_pa': 100000,
+            'psi_to_pa': 6894.76,
+        }
+    
+    def _define_known_formulas(self) -> Dict[str, Dict]:
+        """Define common formulas for validation"""
+        
+        return {
+            'pythagorean_theorem': {
+                'formula': 'a² + b² = c²',
+                'variables': ['a', 'b', 'c'],
+                'constraints': ['a > 0', 'b > 0', 'c > 0', 'c > a', 'c > b']
+            },
+            
+            'quadratic_formula': {
+                'formula': 'x = (-b ± √(b² - 4ac)) / 2a',
+                'variables': ['a', 'b', 'c', 'x'],
+                'constraints': ['a ≠ 0']
+            },
+            
+            'compound_interest': {
+                'formula': 'A = P(1 + r/n)^(nt)',
+                'variables': ['A', 'P', 'r', 'n', 't'],
+                'constraints': ['P > 0', 'r >= 0', 'n > 0', 't >= 0']
+            },
+            
+            'distance_rate_time': {
+                'formula': 'd = rt',
+                'variables': ['d', 'r', 't'],
+                'constraints': ['r >= 0', 't >= 0']
+            },
+            
+            'area_circle': {
+                'formula': 'A = πr²',
+                'variables': ['A', 'r'],
+                'constraints': ['r > 0']
+            },
+            
+            'volume_sphere': {
+                'formula': 'V = (4/3)πr³',
+                'variables': ['V', 'r'],
+                'constraints': ['r > 0']
+            }
+        }
+    
+    def _define_magnitude_ranges(self) -> Dict[str, Tuple[float, float]]:
+        """Define expected ranges for common quantities"""
+        
+        return {
+            # Human measurements
+            'height': (0.5, 2.5),      # meters
+            'weight': (2, 300),         # kg
+            'age': (0, 120),            # years
+            'temperature': (35, 42),    # Celsius (body temp)
+            
+            # Physical constants (rough ranges)
+            'speed': (0, 3e8),          # m/s (up to speed of light)
+            'mass': (0, 1e50),          # kg (very broad)
+            'distance': (0, 1e26),      # m (observable universe)
+            
+            # Financial
+            'salary': (0, 1e9),         # dollars/year
+            'price': (0, 1e12),         # dollars
+            
+            # Percentages
+            'percentage': (0, 100),
+            'probability': (0, 1),
+            
+            # Common units
+            'meters': (0, 1e10),
+            'kilometers': (0, 1e7),
+            'grams': (0, 1e10),
+            'kilograms': (0, 1e7),
+            'seconds': (0, 1e10),
+        }
+    
+    @staticmethod
+    def _normalize_unit(unit: str) -> str:
+        """Normalize unit name for comparison"""
+        
+        # Common abbreviations and variations
+        normalizations = {
+            'km': 'kilometers',
+            'kilom': 'kilometers',
+            'm': 'meters',
+            'metre': 'meters',
+            'metres': 'meters',
+            'kg': 'kilograms',
+            'g': 'grams',
+            'lb': 'pounds',
+            'lbs': 'pounds',
+            'mi': 'miles',
+            'ft': 'feet',
+            'in': 'inches',
+            'sec': 'seconds',
+            's': 'seconds',
+            'hr': 'hours',
+            'hrs': 'hours',
+            'min': 'minutes',
+            'mins': 'minutes',
+        }
+        
+        unit_lower = unit.lower().strip()
+        return normalizations.get(unit_lower, unit_lower)
+    
+    def _get_expected_range(self, context: str) -> Optional[Tuple[float, float]]:
+        """Get expected range for a quantity based on context"""
+        
+        context_normalized = self._normalize_unit(context)
+        return self.magnitude_ranges.get(context_normalized)
+    
+    @staticmethod
+    def _mentions_formula(text: str, formula_name: str) -> bool:
+        """Check if text mentions a specific formula"""
+        
+        formula_keywords = {
+            'pythagorean_theorem': ['pythagorean', 'right triangle', 'hypotenuse'],
+            'quadratic_formula': ['quadratic', 'roots', 'discriminant'],
+            'compound_interest': ['compound interest', 'compounded'],
+            'distance_rate_time': ['distance', 'rate', 'time', 'speed'],
+            'area_circle': ['area', 'circle'],
+            'volume_sphere': ['volume', 'sphere']
+        }
+        
+        keywords = formula_keywords.get(formula_name, [])
+        text_lower = text.lower()
+        
+        return any(keyword in text_lower for keyword in keywords)
+    
+    @staticmethod
+    def _verify_formula_application(text: str, formula_info: Dict) -> bool:
+        """Verify formula is applied correctly (simplified)"""
+        # In production, this would parse and verify the actual calculation
+        # For now, return True (assume correct unless obvious error)
+        return True
+    
+    @staticmethod
+    def _extract_units_from_expression(expression: str) -> str:
+        """Extract units from mathematical expression"""
+        # Simplified - in production would do proper dimensional analysis
+        unit_pattern = r'\[([^\]]+)\]'
+        match = re.search(unit_pattern, expression)
+        return match.group(1) if match else ''
+    
+    @staticmethod
+    def _units_compatible(units1: str, units2: str) -> bool:
+        """Check if units are dimensionally compatible"""
+        # Simplified - in production would do proper dimensional analysis
+        if not units1 or not units2:
+            return True
+        return units1.lower().strip() == units2.lower().strip()
+
+
+class CalculationVerifier:
+    """
+    Specialized calculator for verifying AI calculations with high precision.
+    """
+    
+    def __init__(self):
+        # Set high precision
+        getcontext().prec = 50
+    
+    def verify_arithmetic(
+        self,
+        expression: str,
+        claimed_result: float,
+        tolerance: float = 1e-6
+    ) -> Dict:
+        """
+        Verify an arithmetic expression.
+        
+        Args:
+            expression: Mathematical expression (e.g., "2 + 2 * 3")
+            claimed_result: What the AI claims the result is
+            tolerance: Acceptable error margin
+            
+        Returns:
+            {
+                'correct': bool,
+                'expected': float,
+                'claimed': float,
+                'error': float
+            }
+        """
+        
+        try:
+            # Safely evaluate expression
+            expected = self._safe_eval(expression)
+            
+            error = abs(expected - claimed_result)
+            correct = error < tolerance
+            
+            return {
+                'correct': correct,
+                'expected': float(expected),
+                'claimed': claimed_result,
+                'error': float(error),
+                'relative_error': float(error / max(abs(expected), 1e-10))
+            }
+        
+        except Exception as e:
+            logger.error(f"Calculation verification error: {e}")
+            return {
+                'correct': False,
+                'error': 'evaluation_failed',
+                'message': str(e)
+            }
+    
+    def _safe_eval(self, expression: str) -> Decimal:
+        """Safely evaluate mathematical expression"""
+        
+        # Replace operators with Python equivalents
+        expression = expression.replace('×', '*')
+        expression = expression.replace('÷', '/')
+        
+        # Use Decimal for precision
+        # Only allow numbers, operators, parentheses
+        allowed_chars = set('0123456789.+-*/() ')
+        if not all(c in allowed_chars for c in expression):
+            raise ValueError("Invalid characters in expression")
+        
+        # Evaluate using Decimal
+        try:
+            # Convert to use Decimal
+            result = eval(expression, {"__builtins__": {}}, {})
+            return Decimal(str(result))
+        except:
+            raise ValueError("Expression evaluation failed")
+    
+    def verify_percentage(
+        self,
+        percentage: float,
+        base: float,
+        claimed_result: float
+    ) -> Dict:
+        """Verify percentage calculation"""
+        
+        expected = Decimal(str(percentage)) / Decimal('100') * Decimal(str(base))
+        error = abs(expected - Decimal(str(claimed_result)))
+        
+        return {
+            'correct': error < Decimal('1e-6'),
+            'expected': float(expected),
+            'claimed': claimed_result,
+            'error': float(error)
+        }
+    
+    def verify_compound_calculation(
+        self,
+        steps: List[Dict]
+    ) -> Dict:
+        """
+        Verify multi-step calculation.
+        
+        Args:
+            steps: List of {
+                'operation': str,
+                'result': float
+            }
+        """
+        
+        current_value = Decimal('0')
+        
+        for i, step in enumerate(steps):
+            try:
+                if i == 0:
+                    # First step
+                    current_value = self._safe_eval(step['operation'])
+                else:
+                    # Subsequent steps use previous result
+                    operation = step['operation'].replace('result', str(current_value))
+                    current_value = self._safe_eval(operation)
+                
+                claimed = Decimal(str(step['result']))
+                error = abs(current_value - claimed)
+                
+                if error > Decimal('1e-6'):
+                    return {
+                        'correct': False,
+                        'failed_at_step': i + 1,
+                        'expected': float(current_value),
+                        'claimed': float(claimed)
+                    }
+            
+            except Exception as e:
+                return {
+                    'correct': False,
+                    'failed_at_step': i + 1,
+                    'error': str(e)
+                }
+        
+        return {
+            'correct': True,
+            'final_result': float(current_value)
+        }
+
+
+# Example usage and test cases
+if __name__ == "__main__":
+    checker = MathematicalSoundnessChecker()
+    
+    # Test 1: Arithmetic error
+    text1 = "The calculation is 10 + 15 = 30"
+    result1 = checker.validate_mathematics(text1)
+    print("Test 1 (Arithmetic Error):", result1)
+    
+    # Test 2: Unit conversion error
+    text2 = "100 kilometers = 100 miles"
+    result2 = checker.validate_mathematics(text2)
+    print("\nTest 2 (Unit Conversion Error):", result2)
+    
+    # Test 3: Percentage calculation
+    text3 = "15% of 200 = 30"
+    result3 = checker.validate_mathematics(text3)
+    print("\nTest 3 (Percentage Calculation):", result3)
+    
+    # Test 4: Statistical error
+    text4 = "The correlation between X and Y is 0.8, therefore X causes Y"
+    result4 = checker.validate_mathematics(text4)
+    print("\nTest 4 (Statistical Error):", result4)
+    
+    # Test 5: Order of magnitude
+    text5 = "The average human height is 50 meters"
+    result5 = checker.validate_mathematics(text5)
+    print("\nTest 5 (Order of Magnitude):", result5)
