@@ -1,0 +1,854 @@
+# File: guardrails/layer6/consensus_validation.py
+
+from typing import Dict, List, Optional, Set, Tuple
+from enum import Enum
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from collections import defaultdict
+import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
+
+class ConsensusMethod(Enum):
+    MAJORITY = "majority"                    # >50%
+    SUPERMAJORITY_2_3 = "supermajority_2_3" # ≥66.7%
+    SUPERMAJORITY_3_4 = "supermajority_3_4" # ≥75%
+    UNANIMOUS = "unanimous"                  # 100%
+    WEIGHTED = "weighted"                    # Weighted by expertise
+    BYZANTINE_FAULT_TOLERANT = "bft"        # BFT consensus
+    QUORUM = "quorum"                       # Minimum participation
+
+@dataclass
+class AgentVote:
+    """Single agent's vote in consensus"""
+    agent_id: str
+    decision: str  # The vote/decision
+    confidence: float  # 0-1
+    reasoning: str  # Explanation
+    reasoning_hash: str  # For duplicate detection
+    evidence: List[str]  # Supporting evidence
+    timestamp: datetime
+    expertise_score: float = 1.0  # For weighted voting
+
+@dataclass
+class ConsensusResult:
+    """Result of consensus validation"""
+    consensus_reached: bool
+    decision: Optional[str]
+    vote_distribution: Dict[str, int]
+    participating_agents: int
+    required_threshold: float
+    actual_agreement: float
+    warnings: List[Dict]
+    validation_issues: List[Dict]
+
+class ConsensusValidator:
+    """
+    Validate consensus mechanisms in multi-agent decisions.
+    
+    Features:
+    - Multiple consensus methods
+    - Reasoning diversity analysis
+    - Sybil attack detection
+    - Groupthink detection
+    - Outlier investigation
+    - Vote manipulation detection
+    - Byzantine fault tolerance
+    """
+    
+    def __init__(self):
+        # Agent expertise scores
+        self.agent_expertise = {}  # {agent_id: expertise_score}
+        
+        # Historical voting patterns
+        self.voting_history = []  # Recent votes for pattern analysis
+        
+        # Known agent relationships (for Sybil detection)
+        self.agent_relationships = {}  # {agent_id: [related_agent_ids]}
+        
+        # Reasoning cache (for duplicate detection)
+        self.reasoning_cache = {}  # {reasoning_hash: [agent_ids]}
+    
+    def validate_consensus(
+        self,
+        votes: List[AgentVote],
+        method: ConsensusMethod = ConsensusMethod.MAJORITY,
+        quorum: Optional[int] = None,
+        context: Dict = None
+    ) -> ConsensusResult:
+        """
+        Validate consensus decision.
+        
+        Args:
+            votes: List of agent votes
+            method: Consensus method to use
+            quorum: Minimum required participants (for quorum method)
+            context: Additional context (decision domain, stakes, etc.)
+            
+        Returns:
+            ConsensusResult
+        """
+        
+        warnings = []
+        validation_issues = []
+        
+        # Check 1: Minimum participation
+        if not votes:
+            return ConsensusResult(
+                consensus_reached=False,
+                decision=None,
+                vote_distribution={},
+                participating_agents=0,
+                required_threshold=0,
+                actual_agreement=0,
+                warnings=[],
+                validation_issues=[{'type': 'no_votes', 'severity': 'critical'}]
+            )
+        
+        # Check 2: Quorum requirement
+        if method == ConsensusMethod.QUORUM or quorum:
+            required_quorum = quorum or len(votes) // 2 + 1
+            if len(votes) < required_quorum:
+                validation_issues.append({
+                    'type': 'quorum_not_met',
+                    'required': required_quorum,
+                    'actual': len(votes),
+                    'severity': 'critical'
+                })
+                return ConsensusResult(
+                    consensus_reached=False,
+                    decision=None,
+                    vote_distribution=self._get_vote_distribution(votes),
+                    participating_agents=len(votes),
+                    required_threshold=required_quorum,
+                    actual_agreement=0,
+                    warnings=warnings,
+                    validation_issues=validation_issues
+                )
+        
+        # Check 3: Sybil attack detection
+        sybil_check = self._detect_sybil_attack(votes)
+        if sybil_check['detected']:
+            validation_issues.append({
+                'type': 'sybil_attack',
+                'suspicious_agents': sybil_check['suspicious_agents'],
+                'confidence': sybil_check['confidence'],
+                'severity': 'critical'
+            })
+        
+        # Check 4: Reasoning diversity
+        diversity_check = self._analyze_reasoning_diversity(votes)
+        if not diversity_check['diverse']:
+            warnings.append({
+                'type': 'low_reasoning_diversity',
+                'duplicate_reasoning_count': diversity_check['duplicate_count'],
+                'diversity_score': diversity_check['diversity_score'],
+                'severity': 'high'
+            })
+        
+        # Check 5: Groupthink detection
+        groupthink_check = self._detect_groupthink(votes)
+        if groupthink_check['detected']:
+            warnings.append({
+                'type': 'potential_groupthink',
+                'indicators': groupthink_check['indicators'],
+                'severity': 'high'
+            })
+        
+        # Check 6: Outlier investigation
+        outlier_check = self._investigate_outliers(votes)
+        if outlier_check['outliers']:
+            warnings.append({
+                'type': 'outlier_opinions',
+                'outliers': outlier_check['outliers'],
+                'investigation_required': True,
+                'severity': 'medium'
+            })
+        
+        # Calculate consensus based on method
+        consensus_result = self._calculate_consensus(votes, method)
+        
+        # Check 7: Unanimous vote scrutiny
+        if len(set(v.decision for v in votes)) == 1:
+            unanimity_check = self._validate_unanimous_vote(votes, context)
+            if not unanimity_check['justified']:
+                warnings.append({
+                    'type': 'suspicious_unanimity',
+                    'reason': unanimity_check['reason'],
+                    'severity': 'medium'
+                })
+        
+        # Check 8: Weighted voting manipulation
+        if method == ConsensusMethod.WEIGHTED:
+            weight_check = self._validate_vote_weights(votes)
+            if not weight_check['valid']:
+                validation_issues.append({
+                    'type': 'weight_manipulation',
+                    'details': weight_check,
+                    'severity': 'high'
+                })
+        
+        # Check 9: Byzantine fault tolerance
+        if method == ConsensusMethod.BYZANTINE_FAULT_TOLERANT:
+            bft_check = self._validate_byzantine_tolerance(votes)
+            if not bft_check['tolerant']:
+                validation_issues.append({
+                    'type': 'bft_failure',
+                    'details': bft_check,
+                    'severity': 'critical'
+                })
+        
+        # Record voting pattern
+        self._record_voting_pattern(votes, consensus_result)
+        
+        return ConsensusResult(
+            consensus_reached=consensus_result['reached'],
+            decision=consensus_result['decision'],
+            vote_distribution=self._get_vote_distribution(votes),
+            participating_agents=len(votes),
+            required_threshold=consensus_result['required_threshold'],
+            actual_agreement=consensus_result['agreement_ratio'],
+            warnings=warnings,
+            validation_issues=validation_issues
+        )
+    
+    def _detect_sybil_attack(self, votes: List[AgentVote]) -> Dict:
+        """
+        Detect Sybil attacks (one entity controlling multiple agents).
+        
+        Indicators:
+        - Identical reasoning patterns
+        - Synchronized timing
+        - Same IP/source (if available in metadata)
+        - Known agent relationships voting together
+        """
+        
+        suspicious_groups = []
+        
+        # Group 1: Identical reasoning
+        reasoning_groups = defaultdict(list)
+        for vote in votes:
+            reasoning_groups[vote.reasoning_hash].append(vote.agent_id)
+        
+        for reasoning_hash, agent_ids in reasoning_groups.items():
+            if len(agent_ids) >= 3:  # 3+ agents with identical reasoning
+                suspicious_groups.append({
+                    'type': 'identical_reasoning',
+                    'agents': agent_ids,
+                    'count': len(agent_ids)
+                })
+        
+        # Group 2: Synchronized timing (votes within 1 second)
+        time_clusters = self._find_time_clusters(votes, window_seconds=1)
+        for cluster in time_clusters:
+            if len(cluster) >= 3:
+                suspicious_groups.append({
+                    'type': 'synchronized_timing',
+                    'agents': cluster,
+                    'count': len(cluster)
+                })
+        
+        # Group 3: Known relationships voting identically
+        for vote in votes:
+            related_agents = self.agent_relationships.get(vote.agent_id, [])
+            related_votes = [v for v in votes if v.agent_id in related_agents]
+            
+            if len(related_votes) >= 2:
+                # Check if they all voted the same way
+                decisions = [v.decision for v in related_votes + [vote]]
+                if len(set(decisions)) == 1:
+                    suspicious_groups.append({
+                        'type': 'related_agents_identical_vote',
+                        'agents': [vote.agent_id] + related_agents,
+                        'count': len(related_votes) + 1
+                    })
+        
+        # Calculate confidence based on number of indicators
+        if suspicious_groups:
+            confidence = min(0.5 + (len(suspicious_groups) * 0.2), 0.95)
+            unique_agents = set()
+            for group in suspicious_groups:
+                unique_agents.update(group['agents'])
+            
+            return {
+                'detected': True,
+                'suspicious_agents': list(unique_agents),
+                'indicators': suspicious_groups,
+                'confidence': confidence
+            }
+        
+        return {'detected': False}
+    
+    def _analyze_reasoning_diversity(self, votes: List[AgentVote]) -> Dict:
+        """
+        Analyze diversity of reasoning across votes.
+        
+        High diversity = agents arrived at conclusions independently
+        Low diversity = potential copying or shared bias
+        """
+        
+        if len(votes) < 2:
+            return {'diverse': True, 'diversity_score': 1.0}
+        
+        # Count unique reasoning hashes
+        unique_reasoning = len(set(v.reasoning_hash for v in votes))
+        total_votes = len(votes)
+        
+        diversity_score = unique_reasoning / total_votes
+        
+        # Count duplicate reasoning
+        reasoning_counts = defaultdict(int)
+        for vote in votes:
+            reasoning_counts[vote.reasoning_hash] += 1
+        
+        duplicate_count = sum(1 for count in reasoning_counts.values() if count > 1)
+        
+        # Check evidence diversity
+        evidence_overlap = self._calculate_evidence_overlap(votes)
+        
+        # Combined diversity score
+        final_diversity = (diversity_score * 0.7) + ((1 - evidence_overlap) * 0.3)
+        
+        return {
+            'diverse': final_diversity >= 0.7,
+            'diversity_score': final_diversity,
+            'unique_reasoning_ratio': diversity_score,
+            'duplicate_count': duplicate_count,
+            'evidence_overlap': evidence_overlap
+        }
+    
+    def _detect_groupthink(self, votes: List[AgentVote]) -> Dict:
+        """
+        Detect groupthink indicators.
+        
+        Signs of groupthink:
+        - Unanimous decision without dissent
+        - Very high confidence across all agents
+        - Similar reasoning patterns
+        - Lack of critical questioning in reasoning
+        """
+        
+        indicators = []
+        
+        # Indicator 1: Unanimous without hesitation
+        decisions = [v.decision for v in votes]
+        if len(set(decisions)) == 1 and len(votes) >= 5:
+            avg_confidence = sum(v.confidence for v in votes) / len(votes)
+            if avg_confidence > 0.9:
+                indicators.append({
+                    'type': 'high_confidence_unanimity',
+                    'avg_confidence': avg_confidence
+                })
+        
+        # Indicator 2: No critical questioning
+        critical_keywords = ['however', 'although', 'but', 'concern', 'risk', 'alternative']
+        critical_reasoning_count = 0
+        
+        for vote in votes:
+            reasoning_lower = vote.reasoning.lower()
+            if any(keyword in reasoning_lower for keyword in critical_keywords):
+                critical_reasoning_count += 1
+        
+        critical_ratio = critical_reasoning_count / len(votes)
+        if critical_ratio < 0.2:  # Less than 20% showed critical thinking
+            indicators.append({
+                'type': 'lack_of_critical_thinking',
+                'critical_ratio': critical_ratio
+            })
+        
+        # Indicator 3: Reasoning similarity (semantic, not just hash)
+        if len(votes) >= 3:
+            similarity = self._calculate_semantic_similarity(votes)
+            if similarity > 0.8:
+                indicators.append({
+                    'type': 'high_reasoning_similarity',
+                    'similarity_score': similarity
+                })
+        
+        return {
+            'detected': len(indicators) >= 2,
+            'indicators': indicators
+        }
+    
+    def _investigate_outliers(self, votes: List[AgentVote]) -> Dict:
+        """
+        Identify and investigate outlier opinions.
+        
+        Outliers might represent:
+        - Valid minority perspective
+        - Erroneous agent
+        - Malicious agent
+        """
+        
+        # Find minority votes
+        vote_counts = defaultdict(int)
+        for vote in votes:
+            vote_counts[vote.decision] += 1
+        
+        majority_decision = max(vote_counts, key=vote_counts.get)
+        majority_count = vote_counts[majority_decision]
+        
+        outliers = []
+        
+        for vote in votes:
+            if vote.decision != majority_decision:
+                # This is an outlier
+                outlier_info = {
+                    'agent_id': vote.agent_id,
+                    'decision': vote.decision,
+                    'reasoning': vote.reasoning,
+                    'confidence': vote.confidence,
+                    'expertise': vote.expertise_score
+                }
+                
+                # Check if outlier has valid reasoning
+                reasoning_quality = self._assess_reasoning_quality(vote.reasoning)
+                outlier_info['reasoning_quality'] = reasoning_quality
+                
+                # Check if high-expertise agent
+                if vote.expertise_score > 0.8:
+                    outlier_info['high_expertise'] = True
+                
+                outliers.append(outlier_info)
+        
+        return {
+            'outliers': outliers,
+            'outlier_count': len(outliers),
+            'total_votes': len(votes)
+        }
+    
+    def _calculate_consensus(
+        self,
+        votes: List[AgentVote],
+        method: ConsensusMethod
+    ) -> Dict:
+        """Calculate if consensus reached based on method"""
+        
+        if method == ConsensusMethod.MAJORITY:
+            return self._majority_consensus(votes)
+        
+        elif method == ConsensusMethod.SUPERMAJORITY_2_3:
+            return self._supermajority_consensus(votes, threshold=2/3)
+        
+        elif method == ConsensusMethod.SUPERMAJORITY_3_4:
+            return self._supermajority_consensus(votes, threshold=3/4)
+        
+        elif method == ConsensusMethod.UNANIMOUS:
+            return self._unanimous_consensus(votes)
+        
+        elif method == ConsensusMethod.WEIGHTED:
+            return self._weighted_consensus(votes)
+        
+        elif method == ConsensusMethod.BYZANTINE_FAULT_TOLERANT:
+            return self._bft_consensus(votes)
+        
+        else:
+            return self._majority_consensus(votes)
+    
+    def _majority_consensus(self, votes: List[AgentVote]) -> Dict:
+        """Simple majority (>50%)"""
+        
+        vote_counts = defaultdict(int)
+        for vote in votes:
+            vote_counts[vote.decision] += 1
+        
+        majority_decision = max(vote_counts, key=vote_counts.get)
+        majority_count = vote_counts[majority_decision]
+        
+        required = len(votes) / 2
+        reached = majority_count > required
+        
+        return {
+            'reached': reached,
+            'decision': majority_decision if reached else None,
+            'required_threshold': required,
+            'agreement_ratio': majority_count / len(votes)
+        }
+    
+    def _supermajority_consensus(
+        self,
+        votes: List[AgentVote],
+        threshold: float
+    ) -> Dict:
+        """Supermajority (2/3 or 3/4)"""
+        
+        vote_counts = defaultdict(int)
+        for vote in votes:
+            vote_counts[vote.decision] += 1
+        
+        top_decision = max(vote_counts, key=vote_counts.get)
+        top_count = vote_counts[top_decision]
+        
+        required = len(votes) * threshold
+        reached = top_count >= required
+        
+        return {
+            'reached': reached,
+            'decision': top_decision if reached else None,
+            'required_threshold': required,
+            'agreement_ratio': top_count / len(votes)
+        }
+    
+    def _unanimous_consensus(self, votes: List[AgentVote]) -> Dict:
+        """Unanimous (100%)"""
+        
+        decisions = set(v.decision for v in votes)
+        reached = len(decisions) == 1
+        
+        return {
+            'reached': reached,
+            'decision': list(decisions)[0] if reached else None,
+            'required_threshold': len(votes),
+            'agreement_ratio': 1.0 if reached else max(
+                sum(1 for v in votes if v.decision == d) / len(votes)
+                for d in decisions
+            )
+        }
+    
+    def _weighted_consensus(self, votes: List[AgentVote]) -> Dict:
+        """Weighted voting by expertise"""
+        
+        weighted_votes = defaultdict(float)
+        total_weight = 0
+        
+        for vote in votes:
+            weighted_votes[vote.decision] += vote.expertise_score
+            total_weight += vote.expertise_score
+        
+        top_decision = max(weighted_votes, key=weighted_votes.get)
+        top_weight = weighted_votes[top_decision]
+        
+        required = total_weight / 2
+        reached = top_weight > required
+        
+        return {
+            'reached': reached,
+            'decision': top_decision if reached else None,
+            'required_threshold': required,
+            'agreement_ratio': top_weight / total_weight
+        }
+    
+    def _bft_consensus(self, votes: List[AgentVote]) -> Dict:
+        """
+        Byzantine Fault Tolerant consensus.
+        Requires 2f+1 honest agents out of 3f+1 total, where f is max faulty.
+        """
+        
+        n = len(votes)
+        f = (n - 1) // 3  # Maximum faulty agents
+        required = 2 * f + 1  # Minimum honest agents needed
+        
+        vote_counts = defaultdict(int)
+        for vote in votes:
+            vote_counts[vote.decision] += 1
+        
+        top_decision = max(vote_counts, key=vote_counts.get)
+        top_count = vote_counts[top_decision]
+        
+        reached = top_count >= required
+        
+        return {
+            'reached': reached,
+            'decision': top_decision if reached else None,
+            'required_threshold': required,
+            'agreement_ratio': top_count / n,
+            'max_faulty_tolerated': f
+        }
+    
+    def _validate_unanimous_vote(
+        self,
+        votes: List[AgentVote],
+        context: Dict
+    ) -> Dict:
+        """
+        Scrutinize unanimous votes for legitimacy.
+        Unanimous votes in complex domains are suspicious.
+        """
+        
+        # Check domain complexity
+        domain = context.get('domain', 'general') if context else 'general'
+        
+        complex_domains = [
+            'medical_diagnosis',
+            'financial_forecasting',
+            'legal_judgment',
+            'security_threat_assessment'
+        ]
+        
+        if domain in complex_domains:
+            # Unanimous votes in complex domains require extra scrutiny
+            
+            # Check reasoning diversity
+            diversity = self._analyze_reasoning_diversity(votes)
+            
+            if diversity['diversity_score'] < 0.5:
+                return {
+                    'justified': False,
+                    'reason': 'Unanimous vote with low reasoning diversity in complex domain'
+                }
+            
+            # Check confidence levels
+            avg_confidence = sum(v.confidence for v in votes) / len(votes)
+            
+            if avg_confidence > 0.95:
+                return {
+                    'justified': False,
+                    'reason': 'Unrealistically high confidence in complex domain'
+                }
+        
+        return {'justified': True}
+    
+    def _validate_vote_weights(self, votes: List[AgentVote]) -> Dict:
+        """Validate weighted voting isn't being manipulated"""
+        
+        # Check if weights are reasonable
+        weights = [v.expertise_score for v in votes]
+        
+        # Detect if one agent has disproportionate weight
+        max_weight = max(weights)
+        total_weight = sum(weights)
+        
+        if max_weight / total_weight > 0.5:  # One agent >50% of total weight
+            return {
+                'valid': False,
+                'reason': 'Single agent has majority of voting weight',
+                'max_weight_ratio': max_weight / total_weight
+            }
+        
+        # Check if weights correlate suspiciously with votes
+        # (agents with higher weights all voting same way)
+        
+        return {'valid': True}
+    
+    def _validate_byzantine_tolerance(self, votes: List[AgentVote]) -> Dict:
+        """Validate BFT requirements are met"""
+        
+        n = len(votes)
+        f = (n - 1) // 3
+        
+        # Check if we have enough agents
+        if n < 4:  # Minimum for BFT is 4 agents (f=1, need 3)
+            return {
+                'tolerant': False,
+                'reason': 'Insufficient agents for BFT (minimum 4)'
+            }
+        
+        # Check for conflicting messages (Byzantine behavior)
+        # In true BFT, same agent shouldn't give conflicting info
+        
+        return {'tolerant': True}
+    
+    def _get_vote_distribution(self, votes: List[AgentVote]) -> Dict[str, int]:
+        """Get distribution of votes"""
+        
+        distribution = defaultdict(int)
+        for vote in votes:
+            distribution[vote.decision] += 1
+        
+        return dict(distribution)
+    
+    def _find_time_clusters(
+        self,
+        votes: List[AgentVote],
+        window_seconds: int = 1
+    ) -> List[List[str]]:
+        """Find clusters of votes within time window"""
+        
+        # Sort by timestamp
+        sorted_votes = sorted(votes, key=lambda v: v.timestamp)
+        
+        clusters = []
+        current_cluster = [sorted_votes[0].agent_id]
+        
+        for i in range(1, len(sorted_votes)):
+            time_diff = (sorted_votes[i].timestamp - sorted_votes[i-1].timestamp).total_seconds()
+            
+            if time_diff <= window_seconds:
+                current_cluster.append(sorted_votes[i].agent_id)
+            else:
+                if len(current_cluster) >= 3:
+                    clusters.append(current_cluster)
+                current_cluster = [sorted_votes[i].agent_id]
+        
+        if len(current_cluster) >= 3:
+            clusters.append(current_cluster)
+        
+        return clusters
+    
+    def _calculate_evidence_overlap(self, votes: List[AgentVote]) -> float:
+        """Calculate how much evidence is shared vs unique"""
+        
+        if len(votes) < 2:
+            return 0.0
+        
+        all_evidence = []
+        for vote in votes:
+            all_evidence.extend(vote.evidence)
+        
+        unique_evidence = len(set(all_evidence))
+        total_evidence = len(all_evidence)
+        
+        if total_evidence == 0:
+            return 0.0
+        
+        # Overlap = 1 - (unique/total)
+        # High overlap means agents using same evidence
+        return 1 - (unique_evidence / total_evidence)
+    
+    def _calculate_semantic_similarity(self, votes: List[AgentVote]) -> float:
+        """Calculate semantic similarity of reasoning (simplified)"""
+        
+        # Simplified: use word overlap
+        # In production: use embeddings
+        
+        all_words = []
+        for vote in votes:
+            words = set(vote.reasoning.lower().split())
+            all_words.append(words)
+        
+        # Calculate pairwise Jaccard similarity
+        similarities = []
+        for i in range(len(all_words)):
+            for j in range(i+1, len(all_words)):
+                intersection = len(all_words[i] & all_words[j])
+                union = len(all_words[i] | all_words[j])
+                if union > 0:
+                    similarities.append(intersection / union)
+        
+        return sum(similarities) / len(similarities) if similarities else 0.0
+    
+    def _assess_reasoning_quality(self, reasoning: str) -> Dict:
+        """Assess quality of reasoning (simplified)"""
+        
+        quality_score = 0.5  # Base score
+        
+        # Check for evidence
+        if 'because' in reasoning.lower() or 'evidence' in reasoning.lower():
+            quality_score += 0.2
+        
+        # Check for consideration of alternatives
+        if 'however' in reasoning.lower() or 'alternatively' in reasoning.lower():
+            quality_score += 0.2
+        
+        # Check length (too short = low quality)
+        if len(reasoning) > 100:
+            quality_score += 0.1
+        
+        return {
+            'score': min(quality_score, 1.0),
+            'has_evidence': 'evidence' in reasoning.lower(),
+            'considers_alternatives': 'however' in reasoning.lower()
+        }
+    
+    def _record_voting_pattern(self, votes: List[AgentVote], result: Dict):
+        """Record voting pattern for historical analysis"""
+        
+        self.voting_history.append({
+            'timestamp': datetime.utcnow(),
+            'agent_ids': [v.agent_id for v in votes],
+            'decisions': [v.decision for v in votes],
+            'consensus_reached': result['reached'],
+            'decision': result.get('decision')
+        })
+        
+        # Keep only recent history
+        if len(self.voting_history) > 1000:
+            self.voting_history = self.voting_history[-1000:]
+
+
+# Example usage
+if __name__ == "__main__":
+    validator = ConsensusValidator()
+    
+    # Create test votes
+    votes = [
+        AgentVote(
+            agent_id='diagnostic-agent-001',
+            decision='diagnosis_A',
+            confidence=0.85,
+            reasoning='Patient symptoms match disease A: fever, cough, fatigue. Lab results confirm.',
+            reasoning_hash=hashlib.sha256('reasoning1'.encode()).hexdigest(),
+            evidence=['symptom: fever', 'symptom: cough', 'lab: positive'],
+            timestamp=datetime.utcnow(),
+            expertise_score=0.9
+        ),
+        AgentVote(
+            agent_id='diagnostic-agent-002',
+            decision='diagnosis_A',
+            confidence=0.80,
+            reasoning='Disease A is most likely given the combination of respiratory symptoms and positive lab test.',
+            reasoning_hash=hashlib.sha256('reasoning2'.encode()).hexdigest(),
+            evidence=['symptom: respiratory', 'lab: positive'],
+            timestamp=datetime.utcnow() + timedelta(seconds=2),
+            expertise_score=0.85
+        ),
+        AgentVote(
+            agent_id='diagnostic-agent-003',
+            decision='diagnosis_A',
+            confidence=0.75,
+            reasoning='While diagnosis A is likely, we should also consider diagnosis B given patient age.',
+            reasoning_hash=hashlib.sha256('reasoning3'.encode()).hexdigest(),
+            evidence=['symptom: fever', 'patient: age>65'],
+            timestamp=datetime.utcnow() + timedelta(seconds=5),
+            expertise_score=0.95
+        ),
+        AgentVote(
+            agent_id='diagnostic-agent-004',
+            decision='diagnosis_B',
+            confidence=0.70,
+            reasoning='Patient age and pre-existing conditions suggest diagnosis B is more appropriate.',
+            reasoning_hash=hashlib.sha256('reasoning4'.encode()).hexdigest(),
+            evidence=['patient: age>65', 'patient: diabetes'],
+            timestamp=datetime.utcnow() + timedelta(seconds=7),
+            expertise_score=0.88
+        )
+    ]
+    
+    # Test 1: Majority consensus
+    result1 = validator.validate_consensus(
+        votes=votes,
+        method=ConsensusMethod.MAJORITY,
+        context={'domain': 'medical_diagnosis'}
+    )
+    
+    print("Test 1 - Majority Consensus:")
+    print(f"  Consensus reached: {result1.consensus_reached}")
+    print(f"  Decision: {result1.decision}")
+    print(f"  Agreement: {result1.actual_agreement:.1%}")
+    print(f"  Vote distribution: {result1.vote_distribution}")
+    print(f"  Warnings: {len(result1.warnings)}")
+    for warning in result1.warnings:
+        print(f"    - {warning['type']}")
+    
+    # Test 2: Detect groupthink with identical reasoning
+    identical_votes = [
+        AgentVote(
+            agent_id=f'agent-{i:03d}',
+            decision='approve',
+            confidence=0.95,
+            reasoning='This is the correct decision based on the data.',  # Same reasoning
+            reasoning_hash=hashlib.sha256('identical'.encode()).hexdigest(),
+            evidence=['data_point_1'],
+            timestamp=datetime.utcnow() + timedelta(milliseconds=i*100),
+            expertise_score=0.8
+        )
+        for i in range(5)
+    ]
+    
+    result2 = validator.validate_consensus(
+        votes=identical_votes,
+        method=ConsensusMethod.UNANIMOUS
+    )
+    
+    print("\nTest 2 - Groupthink Detection:")
+    print(f"  Consensus reached: {result2.consensus_reached}")
+    print(f"  Warnings: {len(result2.warnings)}")
+    for warning in result2.warnings:
+        print(f"    - {warning['type']}: {warning.get('reason', 'N/A')}")
+    
+    # Test 3: Sybil attack detection
+    print(f"\nTest 3 - Checking for validation issues:")
+    if result2.validation_issues:
+        for issue in result2.validation_issues:
+            print(f"  - {issue['type']} (severity: {issue['severity']})")
