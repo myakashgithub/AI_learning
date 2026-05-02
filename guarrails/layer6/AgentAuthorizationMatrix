@@ -1,0 +1,874 @@
+# File: guardrails/layer6/authorization_matrix.py
+
+from typing import Dict, List, Optional, Set, Tuple
+from enum import Enum
+from dataclasses import dataclass
+from datetime import datetime, time as datetime_time
+import networkx as nx
+import logging
+
+logger = logging.getLogger(__name__)
+
+class AgentClass(Enum):
+    """Agent classification for authorization"""
+    PUBLIC_FACING = "public_facing"        # Customer-facing agents
+    INTERNAL_SERVICE = "internal_service"  # Internal business logic
+    DATA_ACCESS = "data_access"           # Database/data layer
+    PAYMENT_PROCESSING = "payment"         # Financial transactions
+    FRAUD_DETECTION = "fraud"             # Security/fraud
+    MANAGER = "manager"                   # Management/approval
+    ADMIN = "admin"                       # System administration
+    AUDIT = "audit"                       # Audit/logging
+    HR = "hr"                            # Human resources
+    ANALYTICS = "analytics"               # Data analysis
+
+class Action(Enum):
+    """Types of actions agents can request"""
+    READ = "read"
+    WRITE = "write"
+    QUERY = "query"
+    EXECUTE = "execute"
+    APPROVE = "approve"
+    ESCALATE = "escalate"
+    REFUND = "refund"
+    PROCESS_PAYMENT = "process_payment"
+    ACCESS_PII = "access_pii"
+    MODIFY_ACCOUNT = "modify_account"
+    DELETE = "delete"
+
+class InformationLevel(Enum):
+    """Information sensitivity levels"""
+    PUBLIC = 1
+    INTERNAL = 2
+    CONFIDENTIAL = 3
+    RESTRICTED = 4
+    SECRET = 5
+
+@dataclass
+class AuthorizationRule:
+    """Single authorization rule in the matrix"""
+    from_class: AgentClass
+    to_class: AgentClass
+    allowed_actions: Set[Action]
+    max_info_level: InformationLevel
+    max_transaction_value: Optional[float]
+    requires_approval: bool
+    approval_class: Optional[AgentClass]
+    time_restrictions: Optional[Dict] = None  # e.g., {'start': '09:00', 'end': '17:00'}
+    rate_limit_per_hour: Optional[int] = None
+
+@dataclass
+class AuthorizationRequest:
+    """Request for authorization between agents"""
+    from_agent_id: str
+    from_agent_class: AgentClass
+    to_agent_id: str
+    to_agent_class: AgentClass
+    action: Action
+    info_level: InformationLevel
+    transaction_value: Optional[float] = None
+    approval_obtained: bool = False
+    approval_from: Optional[str] = None
+    context: Optional[Dict] = None
+
+class AgentAuthorizationMatrix:
+    """
+    Comprehensive authorization matrix for multi-agent systems.
+    
+    Features:
+    - Class-based and instance-based authorization
+    - Action-level permissions
+    - Information sensitivity enforcement
+    - Transaction value limits
+    - Approval workflows
+    - Chain analysis (prevent indirect escalation)
+    - Circular trust detection
+    - Time-based restrictions
+    """
+    
+    def __init__(self):
+        # Authorization rules
+        self.rules = self._define_authorization_matrix()
+        
+        # Agent registry
+        self.agents = {}  # {agent_id: {'class': AgentClass, 'metadata': {}}}
+        
+        # Trust graph for chain analysis
+        self.trust_graph = nx.DiGraph()
+        
+        # Override rules for specific agent pairs
+        self.overrides = {}  # {(from_id, to_id): AuthorizationRule}
+        
+        # Approval tracking
+        self.pending_approvals = {}  # {request_id: AuthorizationRequest}
+        
+        # Rate limiting
+        self.action_counts = {}  # {(from_id, to_id): [(timestamp, action), ...]}
+    
+    def register_agent(
+        self,
+        agent_id: str,
+        agent_class: AgentClass,
+        metadata: Dict = None
+    ):
+        """Register agent in the authorization system"""
+        
+        self.agents[agent_id] = {
+            'class': agent_class,
+            'metadata': metadata or {},
+            'registered_at': datetime.utcnow()
+        }
+        
+        # Add to trust graph
+        self.trust_graph.add_node(agent_id, agent_class=agent_class)
+        
+        logger.info(f"Agent registered: {agent_id} [{agent_class.value}]")
+    
+    def check_authorization(
+        self,
+        request: AuthorizationRequest
+    ) -> Dict:
+        """
+        Check if authorization request should be granted.
+        
+        Returns:
+            {
+                'authorized': bool,
+                'violations': List[dict],
+                'warnings': List[dict],
+                'approval_required': bool,
+                'chain_analysis': dict
+            }
+        """
+        
+        violations = []
+        warnings = []
+        
+        # Step 1: Verify agents are registered
+        if request.from_agent_id not in self.agents:
+            violations.append({
+                'type': 'unregistered_agent',
+                'agent_id': request.from_agent_id,
+                'severity': 'critical'
+            })
+        
+        if request.to_agent_id not in self.agents:
+            violations.append({
+                'type': 'unregistered_agent',
+                'agent_id': request.to_agent_id,
+                'severity': 'critical'
+            })
+        
+        if violations:
+            return {
+                'authorized': False,
+                'violations': violations,
+                'warnings': [],
+                'approval_required': False
+            }
+        
+        # Step 2: Check for override rules (specific agent pairs)
+        override_key = (request.from_agent_id, request.to_agent_id)
+        if override_key in self.overrides:
+            rule = self.overrides[override_key]
+        else:
+            # Step 3: Find applicable rule from matrix
+            rule = self._find_applicable_rule(
+                request.from_agent_class,
+                request.to_agent_class
+            )
+        
+        if not rule:
+            violations.append({
+                'type': 'no_authorization_rule',
+                'from_class': request.from_agent_class.value,
+                'to_class': request.to_agent_class.value,
+                'severity': 'critical'
+            })
+            return {
+                'authorized': False,
+                'violations': violations,
+                'warnings': warnings,
+                'approval_required': False
+            }
+        
+        # Step 4: Check action allowed
+        if request.action not in rule.allowed_actions:
+            violations.append({
+                'type': 'action_not_allowed',
+                'action': request.action.value,
+                'allowed_actions': [a.value for a in rule.allowed_actions],
+                'severity': 'high'
+            })
+        
+        # Step 5: Check information level
+        if request.info_level.value > rule.max_info_level.value:
+            violations.append({
+                'type': 'information_level_exceeded',
+                'requested': request.info_level.value,
+                'max_allowed': rule.max_info_level.value,
+                'severity': 'high'
+            })
+        
+        # Step 6: Check transaction value
+        if request.transaction_value is not None:
+            if rule.max_transaction_value is None:
+                violations.append({
+                    'type': 'transactions_not_allowed',
+                    'severity': 'high'
+                })
+            elif request.transaction_value > rule.max_transaction_value:
+                violations.append({
+                    'type': 'transaction_value_exceeded',
+                    'requested': request.transaction_value,
+                    'max_allowed': rule.max_transaction_value,
+                    'severity': 'high'
+                })
+        
+        # Step 7: Check approval requirement
+        approval_required = rule.requires_approval
+        if approval_required and not request.approval_obtained:
+            warnings.append({
+                'type': 'approval_required',
+                'approval_class': rule.approval_class.value if rule.approval_class else 'any_manager',
+                'severity': 'medium'
+            })
+        
+        # Step 8: Check time restrictions
+        if rule.time_restrictions:
+            time_check = self._check_time_restrictions(rule.time_restrictions)
+            if not time_check['allowed']:
+                violations.append({
+                    'type': 'time_restriction',
+                    'current_time': time_check['current_time'],
+                    'allowed_window': rule.time_restrictions,
+                    'severity': 'medium'
+                })
+        
+        # Step 9: Check rate limits
+        if rule.rate_limit_per_hour:
+            rate_check = self._check_rate_limit(
+                request.from_agent_id,
+                request.to_agent_id,
+                request.action,
+                rule.rate_limit_per_hour
+            )
+            if not rate_check['allowed']:
+                violations.append({
+                    'type': 'rate_limit_exceeded',
+                    'current_rate': rate_check['current_rate'],
+                    'limit': rule.rate_limit_per_hour,
+                    'severity': 'medium'
+                })
+        
+        # Step 10: Chain analysis
+        chain_analysis = self._analyze_authorization_chain(
+            request.from_agent_id,
+            request.to_agent_id,
+            request.action,
+            request.context
+        )
+        
+        if chain_analysis['suspicious']:
+            warnings.append({
+                'type': 'suspicious_chain',
+                'details': chain_analysis,
+                'severity': 'high'
+            })
+        
+        # Step 11: Circular trust detection
+        circular_check = self._detect_circular_trust(
+            request.from_agent_id,
+            request.to_agent_id
+        )
+        
+        if circular_check['detected']:
+            violations.append({
+                'type': 'circular_trust',
+                'cycle': circular_check['cycle'],
+                'severity': 'critical'
+            })
+        
+        # Determine authorization
+        critical_violations = [v for v in violations if v['severity'] in ['critical', 'high']]
+        authorized = len(critical_violations) == 0
+        
+        # If approved, authorization can proceed despite warnings
+        if approval_required and request.approval_obtained:
+            authorized = True
+        
+        # Record authorization attempt
+        if authorized:
+            self._record_authorization(request)
+        
+        return {
+            'authorized': authorized,
+            'violations': violations,
+            'warnings': warnings,
+            'approval_required': approval_required and not request.approval_obtained,
+            'chain_analysis': chain_analysis
+        }
+    
+    def request_approval(
+        self,
+        request: AuthorizationRequest,
+        requesting_agent_id: str
+    ) -> str:
+        """
+        Create approval request.
+        
+        Returns:
+            approval_request_id
+        """
+        
+        import uuid
+        request_id = str(uuid.uuid4())
+        
+        self.pending_approvals[request_id] = {
+            'request': request,
+            'requesting_agent': requesting_agent_id,
+            'created_at': datetime.utcnow(),
+            'status': 'pending'
+        }
+        
+        logger.info(f"Approval request created: {request_id}")
+        
+        return request_id
+    
+    def grant_approval(
+        self,
+        approval_request_id: str,
+        approving_agent_id: str
+    ) -> Dict:
+        """
+        Grant approval for pending request.
+        
+        Returns:
+            {
+                'approved': bool,
+                'reason': str
+            }
+        """
+        
+        if approval_request_id not in self.pending_approvals:
+            return {
+                'approved': False,
+                'reason': 'Approval request not found'
+            }
+        
+        approval_data = self.pending_approvals[approval_request_id]
+        request = approval_data['request']
+        
+        # Verify approving agent has authority
+        if approving_agent_id not in self.agents:
+            return {
+                'approved': False,
+                'reason': 'Approving agent not registered'
+            }
+        
+        approving_agent_class = self.agents[approving_agent_id]['class']
+        
+        # Find required approval class
+        rule = self._find_applicable_rule(
+            request.from_agent_class,
+            request.to_agent_class
+        )
+        
+        if rule and rule.approval_class:
+            if approving_agent_class != rule.approval_class:
+                return {
+                    'approved': False,
+                    'reason': f'Approver must be {rule.approval_class.value}, not {approving_agent_class.value}'
+                }
+        elif approving_agent_class not in [AgentClass.MANAGER, AgentClass.ADMIN]:
+            return {
+                'approved': False,
+                'reason': 'Approver must be MANAGER or ADMIN'
+            }
+        
+        # Grant approval
+        approval_data['status'] = 'approved'
+        approval_data['approved_by'] = approving_agent_id
+        approval_data['approved_at'] = datetime.utcnow()
+        
+        # Update original request
+        request.approval_obtained = True
+        request.approval_from = approving_agent_id
+        
+        logger.info(f"Approval granted: {approval_request_id} by {approving_agent_id}")
+        
+        return {
+            'approved': True,
+            'approved_by': approving_agent_id
+        }
+    
+    def add_authorization_override(
+        self,
+        from_agent_id: str,
+        to_agent_id: str,
+        rule: AuthorizationRule
+    ):
+        """Add specific override rule for agent pair"""
+        
+        key = (from_agent_id, to_agent_id)
+        self.overrides[key] = rule
+        
+        logger.info(f"Authorization override added: {from_agent_id} → {to_agent_id}")
+    
+    def visualize_authorization_paths(
+        self,
+        from_agent_id: str,
+        max_depth: int = 3
+    ) -> Dict:
+        """
+        Visualize all possible authorization paths from agent.
+        Useful for security audits.
+        
+        Returns:
+            {
+                'paths': List[List[str]],
+                'reachable_agents': Set[str],
+                'reachable_classes': Set[str]
+            }
+        """
+        
+        if from_agent_id not in self.agents:
+            return {'error': 'Agent not found'}
+        
+        paths = []
+        reachable = set()
+        reachable_classes = set()
+        
+        def explore_paths(current_id, path, depth):
+            if depth >= max_depth:
+                return
+            
+            if current_id not in self.agents:
+                return
+            
+            current_class = self.agents[current_id]['class']
+            
+            # Find all agents this one can communicate with
+            for target_id, target_data in self.agents.items():
+                if target_id == current_id or target_id in path:
+                    continue
+                
+                target_class = target_data['class']
+                
+                # Check if communication is authorized
+                rule = self._find_applicable_rule(current_class, target_class)
+                
+                if rule and rule.allowed_actions:
+                    new_path = path + [target_id]
+                    paths.append(new_path)
+                    reachable.add(target_id)
+                    reachable_classes.add(target_class.value)
+                    
+                    # Recursive exploration
+                    explore_paths(target_id, new_path, depth + 1)
+        
+        explore_paths(from_agent_id, [from_agent_id], 0)
+        
+        return {
+            'paths': paths,
+            'reachable_agents': list(reachable),
+            'reachable_classes': list(reachable_classes),
+            'total_paths': len(paths)
+        }
+    
+    def _find_applicable_rule(
+        self,
+        from_class: AgentClass,
+        to_class: AgentClass
+    ) -> Optional[AuthorizationRule]:
+        """Find authorization rule for class pair"""
+        
+        for rule in self.rules:
+            if rule.from_class == from_class and rule.to_class == to_class:
+                return rule
+        
+        return None
+    
+    def _analyze_authorization_chain(
+        self,
+        from_agent_id: str,
+        to_agent_id: str,
+        action: Action,
+        context: Dict
+    ) -> Dict:
+        """
+        Analyze authorization chain for privilege escalation.
+        
+        Detects:
+        - Indirect privilege escalation (A→B→C where A→C forbidden)
+        - Chain length suspicious
+        - Trust boundary violations
+        """
+        
+        chain = context.get('agent_chain', []) if context else []
+        
+        if not chain:
+            return {'suspicious': False}
+        
+        full_chain = chain + [from_agent_id, to_agent_id]
+        
+        # Check 1: Chain too long
+        if len(full_chain) > 4:
+            return {
+                'suspicious': True,
+                'reason': 'authorization_chain_too_long',
+                'chain_length': len(full_chain),
+                'chain': full_chain
+            }
+        
+        # Check 2: First agent cannot reach last agent directly
+        if len(full_chain) >= 3:
+            first_agent = full_chain[0]
+            last_agent = full_chain[-1]
+            
+            if first_agent in self.agents and last_agent in self.agents:
+                first_class = self.agents[first_agent]['class']
+                last_class = self.agents[last_agent]['class']
+                
+                # Check if direct communication is forbidden
+                direct_rule = self._find_applicable_rule(first_class, last_class)
+                
+                if not direct_rule or action not in direct_rule.allowed_actions:
+                    return {
+                        'suspicious': True,
+                        'reason': 'indirect_escalation',
+                        'chain': full_chain,
+                        'first_class': first_class.value,
+                        'last_class': last_class.value,
+                        'direct_communication_allowed': direct_rule is not None
+                    }
+        
+        # Check 3: Trust boundary violations
+        boundaries_crossed = self._analyze_trust_boundaries(full_chain)
+        
+        if boundaries_crossed['violations']:
+            return {
+                'suspicious': True,
+                'reason': 'trust_boundary_violations',
+                'violations': boundaries_crossed['violations'],
+                'chain': full_chain
+            }
+        
+        return {'suspicious': False}
+    
+    def _analyze_trust_boundaries(self, chain: List[str]) -> Dict:
+        """Analyze trust boundaries crossed in chain"""
+        
+        # Define trust boundary levels (lower = more trusted)
+        boundary_levels = {
+            AgentClass.ADMIN: 0,
+            AgentClass.MANAGER: 1,
+            AgentClass.HR: 1,
+            AgentClass.PAYMENT_PROCESSING: 2,
+            AgentClass.DATA_ACCESS: 2,
+            AgentClass.FRAUD_DETECTION: 2,
+            AgentClass.INTERNAL_SERVICE: 3,
+            AgentClass.ANALYTICS: 3,
+            AgentClass.AUDIT: 3,
+            AgentClass.PUBLIC_FACING: 4
+        }
+        
+        violations = []
+        
+        for i in range(len(chain) - 1):
+            current_agent = chain[i]
+            next_agent = chain[i + 1]
+            
+            if current_agent in self.agents and next_agent in self.agents:
+                current_class = self.agents[current_agent]['class']
+                next_class = self.agents[next_agent]['class']
+                
+                current_level = boundary_levels.get(current_class, 5)
+                next_level = boundary_levels.get(next_class, 5)
+                
+                # Violation if less trusted agent accessing more trusted
+                if current_level > next_level:
+                    violations.append({
+                        'from_agent': current_agent,
+                        'from_class': current_class.value,
+                        'from_level': current_level,
+                        'to_agent': next_agent,
+                        'to_class': next_class.value,
+                        'to_level': next_level
+                    })
+        
+        return {'violations': violations}
+    
+    def _detect_circular_trust(
+        self,
+        from_agent_id: str,
+        to_agent_id: str
+    ) -> Dict:
+        """Detect circular trust relationships"""
+        
+        # Add edge to trust graph temporarily
+        self.trust_graph.add_edge(from_agent_id, to_agent_id)
+        
+        try:
+            # Find cycles
+            cycles = list(nx.simple_cycles(self.trust_graph))
+            
+            # Check if new edge creates cycle
+            for cycle in cycles:
+                if from_agent_id in cycle and to_agent_id in cycle:
+                    return {
+                        'detected': True,
+                        'cycle': cycle
+                    }
+        
+        finally:
+            # Remove temporary edge
+            self.trust_graph.remove_edge(from_agent_id, to_agent_id)
+        
+        return {'detected': False}
+    
+    def _check_time_restrictions(self, restrictions: Dict) -> Dict:
+        """Check if current time falls within allowed window"""
+        
+        current_time = datetime.utcnow().time()
+        
+        start_time = datetime.strptime(restrictions['start'], '%H:%M').time()
+        end_time = datetime.strptime(restrictions['end'], '%H:%M').time()
+        
+        if start_time <= current_time <= end_time:
+            return {'allowed': True}
+        
+        return {
+            'allowed': False,
+            'current_time': current_time.strftime('%H:%M')
+        }
+    
+    def _check_rate_limit(
+        self,
+        from_agent: str,
+        to_agent: str,
+        action: Action,
+        limit: int
+    ) -> Dict:
+        """Check rate limit for agent pair"""
+        
+        key = (from_agent, to_agent)
+        current_time = datetime.utcnow()
+        
+        if key not in self.action_counts:
+            self.action_counts[key] = []
+        
+        # Remove old entries (older than 1 hour)
+        cutoff = current_time - timedelta(hours=1)
+        self.action_counts[key] = [
+            (ts, act) for ts, act in self.action_counts[key]
+            if ts > cutoff
+        ]
+        
+        current_rate = len(self.action_counts[key])
+        
+        if current_rate >= limit:
+            return {
+                'allowed': False,
+                'current_rate': current_rate,
+                'limit': limit
+            }
+        
+        return {
+            'allowed': True,
+            'current_rate': current_rate
+        }
+    
+    def _record_authorization(self, request: AuthorizationRequest):
+        """Record authorized interaction"""
+        
+        # Add edge to trust graph (persistent)
+        self.trust_graph.add_edge(
+            request.from_agent_id,
+            request.to_agent_id,
+            action=request.action.value,
+            timestamp=datetime.utcnow()
+        )
+        
+        # Record for rate limiting
+        key = (request.from_agent_id, request.to_agent_id)
+        if key not in self.action_counts:
+            self.action_counts[key] = []
+        
+        self.action_counts[key].append((datetime.utcnow(), request.action))
+    
+    def _define_authorization_matrix(self) -> List[AuthorizationRule]:
+        """Define the authorization matrix rules"""
+        
+        return [
+            # PUBLIC_FACING → INTERNAL_SERVICE
+            AuthorizationRule(
+                from_class=AgentClass.PUBLIC_FACING,
+                to_class=AgentClass.INTERNAL_SERVICE,
+                allowed_actions={Action.QUERY, Action.READ, Action.ESCALATE},
+                max_info_level=InformationLevel.INTERNAL,
+                max_transaction_value=None,
+                requires_approval=False,
+                approval_class=None,
+                rate_limit_per_hour=100
+            ),
+            
+            # PUBLIC_FACING → PAYMENT_PROCESSING (limited)
+            AuthorizationRule(
+                from_class=AgentClass.PUBLIC_FACING,
+                to_class=AgentClass.PAYMENT_PROCESSING,
+                allowed_actions={Action.REFUND},
+                max_info_level=InformationLevel.INTERNAL,
+                max_transaction_value=500.0,  # Max $500 refund
+                requires_approval=False,
+                approval_class=None,
+                rate_limit_per_hour=50
+            ),
+            
+            # PUBLIC_FACING → MANAGER (escalation)
+            AuthorizationRule(
+                from_class=AgentClass.PUBLIC_FACING,
+                to_class=AgentClass.MANAGER,
+                allowed_actions={Action.ESCALATE},
+                max_info_level=InformationLevel.CONFIDENTIAL,
+                max_transaction_value=None,
+                requires_approval=False,
+                approval_class=None,
+                rate_limit_per_hour=20
+            ),
+            
+            # INTERNAL_SERVICE → DATA_ACCESS
+            AuthorizationRule(
+                from_class=AgentClass.INTERNAL_SERVICE,
+                to_class=AgentClass.DATA_ACCESS,
+                allowed_actions={Action.READ, Action.QUERY},
+                max_info_level=InformationLevel.CONFIDENTIAL,
+                max_transaction_value=None,
+                requires_approval=False,
+                approval_class=None,
+                rate_limit_per_hour=500
+            ),
+            
+            # PAYMENT_PROCESSING → FRAUD_DETECTION
+            AuthorizationRule(
+                from_class=AgentClass.PAYMENT_PROCESSING,
+                to_class=AgentClass.FRAUD_DETECTION,
+                allowed_actions={Action.QUERY},
+                max_info_level=InformationLevel.CONFIDENTIAL,
+                max_transaction_value=None,
+                requires_approval=False,
+                approval_class=None,
+                rate_limit_per_hour=1000
+            ),
+            
+            # MANAGER → PAYMENT_PROCESSING (high value)
+            AuthorizationRule(
+                from_class=AgentClass.MANAGER,
+                to_class=AgentClass.PAYMENT_PROCESSING,
+                allowed_actions={Action.REFUND, Action.PROCESS_PAYMENT},
+                max_info_level=InformationLevel.CONFIDENTIAL,
+                max_transaction_value=10000.0,  # Max $10K
+                requires_approval=False,
+                approval_class=None,
+                rate_limit_per_hour=100
+            ),
+            
+            # ADMIN → DATA_ACCESS (with approval)
+            AuthorizationRule(
+                from_class=AgentClass.ADMIN,
+                to_class=AgentClass.DATA_ACCESS,
+                allowed_actions={Action.READ, Action.WRITE, Action.DELETE},
+                max_info_level=InformationLevel.SECRET,
+                max_transaction_value=None,
+                requires_approval=True,
+                approval_class=AgentClass.ADMIN,
+                rate_limit_per_hour=50
+            ),
+            
+            # Any → AUDIT (logging)
+            AuthorizationRule(
+                from_class=AgentClass.PUBLIC_FACING,  # Represents "any"
+                to_class=AgentClass.AUDIT,
+                allowed_actions={Action.WRITE},
+                max_info_level=InformationLevel.RESTRICTED,
+                max_transaction_value=None,
+                requires_approval=False,
+                approval_class=None,
+                rate_limit_per_hour=10000
+            ),
+            
+            # FORBIDDEN: PUBLIC_FACING → DATA_ACCESS (direct)
+            # (No rule defined = forbidden)
+            
+            # FORBIDDEN: PUBLIC_FACING → HR
+            # (No rule defined = forbidden)
+        ]
+
+
+# Example usage
+if __name__ == "__main__":
+    matrix = AgentAuthorizationMatrix()
+    
+    # Register agents
+    matrix.register_agent('customer-bot-001', AgentClass.PUBLIC_FACING)
+    matrix.register_agent('internal-service-001', AgentClass.INTERNAL_SERVICE)
+    matrix.register_agent('payment-agent-001', AgentClass.PAYMENT_PROCESSING)
+    matrix.register_agent('database-agent-001', AgentClass.DATA_ACCESS)
+    matrix.register_agent('manager-agent-001', AgentClass.MANAGER)
+    
+    # Test 1: Authorized request
+    request1 = AuthorizationRequest(
+        from_agent_id='customer-bot-001',
+        from_agent_class=AgentClass.PUBLIC_FACING,
+        to_agent_id='internal-service-001',
+        to_agent_class=AgentClass.INTERNAL_SERVICE,
+        action=Action.QUERY,
+        info_level=InformationLevel.INTERNAL
+    )
+    
+    result1 = matrix.check_authorization(request1)
+    print("Test 1 - Authorized request:")
+    print(f"  Authorized: {result1['authorized']}")
+    print(f"  Violations: {len(result1['violations'])}")
+    
+    # Test 2: Direct database access (should fail)
+    request2 = AuthorizationRequest(
+        from_agent_id='customer-bot-001',
+        from_agent_class=AgentClass.PUBLIC_FACING,
+        to_agent_id='database-agent-001',
+        to_agent_class=AgentClass.DATA_ACCESS,
+        action=Action.READ,
+        info_level=InformationLevel.INTERNAL
+    )
+    
+    result2 = matrix.check_authorization(request2)
+    print("\nTest 2 - Direct database access:")
+    print(f"  Authorized: {result2['authorized']}")
+    print(f"  Violations:")
+    for v in result2['violations']:
+        print(f"    - {v['type']} (severity: {v['severity']})")
+    
+    # Test 3: Transaction value exceeded
+    request3 = AuthorizationRequest(
+        from_agent_id='customer-bot-001',
+        from_agent_class=AgentClass.PUBLIC_FACING,
+        to_agent_id='payment-agent-001',
+        to_agent_class=AgentClass.PAYMENT_PROCESSING,
+        action=Action.REFUND,
+        info_level=InformationLevel.INTERNAL,
+        transaction_value=1000.0  # Exceeds $500 limit
+    )
+    
+    result3 = matrix.check_authorization(request3)
+    print("\nTest 3 - Transaction value exceeded:")
+    print(f"  Authorized: {result3['authorized']}")
+    for v in result3['violations']:
+        if v['type'] == 'transaction_value_exceeded':
+            print(f"  Requested: ${v['requested']}, Max: ${v['max_allowed']}")
+    
+    # Test 4: Authorization paths
+    paths = matrix.visualize_authorization_paths('customer-bot-001', max_depth=2)
+    print(f"\nTest 4 - Authorization paths from customer-bot-001:")
+    print(f"  Reachable agents: {paths['reachable_agents']}")
+    print(f"  Reachable classes: {paths['reachable_classes']}")
+    print(f"  Total paths: {paths['total_paths']}")
