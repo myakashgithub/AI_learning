@@ -1,0 +1,128 @@
+# File: guardrails/layer5/math_examples.py
+
+"""
+Examples of mathematical validation in action
+"""
+
+def example_medical_dosage():
+    """Example: Catching medical dosage calculation errors"""
+    
+    checker = MathematicalSoundnessChecker()
+    
+    # INCORRECT reasoning
+    text_wrong = """
+    Patient weighs 150 pounds.
+    Medication dosage is 5 mg/kg.
+    Therefore, give 750 mg.
+    """
+    
+    result = checker.validate_mathematics(text_wrong)
+    print("Medical Dosage (WRONG):")
+    print(f"Valid: {result['valid']}")
+    print(f"Errors: {result['errors']}")
+    # Expected: Should catch that 150 lbs ≠ 150 kg
+    
+    # CORRECT reasoning
+    text_correct = """
+    Patient weighs 150 pounds = 68 kilograms.
+    Medication dosage is 5 mg/kg.
+    Therefore, give 5 × 68 = 340 mg.
+    """
+    
+    result = checker.validate_mathematics(text_correct)
+    print("\nMedical Dosage (CORRECT):")
+    print(f"Valid: {result['valid']}")
+    print(f"Calculations verified: {result['calculations_verified']}")
+
+
+def example_financial_compound_interest():
+    """Example: Verifying compound interest calculation"""
+    
+    checker = MathematicalSoundnessChecker()
+    
+    text = """
+    Initial investment: $10,000
+    Annual interest rate: 5%
+    Compounded monthly (n=12)
+    Time: 3 years
+    
+    Using A = P(1 + r/n)^(nt):
+    A = 10000(1 + 0.05/12)^(12×3)
+    A = 10000(1.004167)^36
+    A = 10000 × 1.1616
+    A = $11,616
+    """
+    
+    result = checker.validate_mathematics(text)
+    print("Compound Interest Calculation:")
+    print(f"Valid: {result['valid']}")
+    if result['errors']:
+        print(f"Errors: {result['errors']}")
+
+
+def example_physics_calculation():
+    """Example: Dimensional analysis in physics"""
+    
+    checker = MathematicalSoundnessChecker()
+    
+    # WRONG: Dimensional inconsistency
+    text_wrong = """
+    Distance = 100 meters
+    Time = 10 seconds
+    Speed = Distance + Time = 110 [m/s]
+    """
+    
+    result = checker.validate_mathematics(text_wrong)
+    print("Physics Calculation (WRONG):")
+    print(f"Valid: {result['valid']}")
+    print(f"Errors: {result['errors']}")
+    # Should catch: Can't add meters and seconds
+    
+    # CORRECT
+    text_correct = """
+    Distance = 100 meters
+    Time = 10 seconds
+    Speed = Distance / Time = 10 [m/s]
+    """
+    
+    result = checker.validate_mathematics(text_correct)
+    print("\nPhysics Calculation (CORRECT):")
+    print(f"Valid: {result['valid']}")
+
+
+def example_statistical_fallacy():
+    """Example: Catching statistical reasoning errors"""
+    
+    checker = MathematicalSoundnessChecker()
+    
+    text = """
+    Study results show p < 0.05, which means there's a 95% probability
+    that the treatment works. Since we're 95% sure, we should recommend
+    this treatment immediately.
+    """
+    
+    result = checker.validate_mathematics(text)
+    print("Statistical Reasoning:")
+    print(f"Valid: {result['valid']}")
+    print(f"Errors found: {len(result['errors'])}")
+    for error in result['errors']:
+        print(f"  - {error['type']}: {error['description']}")
+    # Should catch: p-value misinterpretation
+
+
+if __name__ == "__main__":
+    print("="*60)
+    print("MATHEMATICAL SOUNDNESS VALIDATION EXAMPLES")
+    print("="*60)
+    
+    print("\n" + "="*60)
+    example_medical_dosage()
+    
+    print("\n" + "="*60)
+    example_financial_compound_interest()
+    
+    print("\n" + "="*60)
+    example_physics_calculation()
+    
+    print("\n" + "="*60)
+    example_statistical_fallacy()
