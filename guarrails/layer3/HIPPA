@@ -1,0 +1,121 @@
+class HIPAAComplianceChecker:
+    def __init__(self):
+        self.phi_categories = [
+            'names',
+            'geographic_subdivisions_smaller_than_state',
+            'dates_related_to_individual',
+            'phone_numbers',
+            'fax_numbers',
+            'email_addresses',
+            'ssn',
+            'medical_record_numbers',
+            'health_plan_numbers',
+            'account_numbers',
+            'certificate_license_numbers',
+            'vehicle_identifiers',
+            'device_identifiers',
+            'urls',
+            'ip_addresses',
+            'biometric_identifiers',
+            'full_face_photos',
+            'other_unique_identifiers'
+        ]
+    
+    def check_compliance(self, output: str, context: dict) -> dict:
+        """Check HIPAA compliance"""
+        
+        # HIPAA applies to US healthcare contexts
+        if context.get('domain') != 'healthcare':
+            return {'hipaa_applicable': False}
+        
+        violations = []
+        
+        # Check for PHI disclosure
+        phi_detected = self._detect_phi(output)
+        if phi_detected:
+            violations.append({
+                'violation': 'phi_disclosure',
+                'severity': 'critical',
+                'phi_types': phi_detected,
+                'requirement': 'HIPAA requires de-identification of all PHI in 18 categories'
+            })
+        
+        # Check for medical advice without disclaimer
+        if self._contains_medical_advice(output):
+            if not self._has_medical_disclaimer(output):
+                violations.append({
+                    'violation': 'medical_advice_without_disclaimer',
+                    'severity': 'high',
+                    'requirement': 'Must include disclaimer that AI is not substitute for professional medical advice'
+                })
+        
+        # Check age > 89 years (HIPAA safe harbor)
+        if self._mentions_specific_age_over_89(output):
+            violations.append({
+                'violation': 'specific_age_over_89',
+                'severity': 'high',
+                'requirement': 'HIPAA Safe Harbor: Ages > 89 must be aggregated to 90+'
+            })
+        
+        # Check for minimum necessary standard
+        if self._discusses_patient_info(output):
+            if not self._adheres_to_minimum_necessary(output, context):
+                violations.append({
+                    'violation': 'exceeds_minimum_necessary',
+                    'severity': 'medium',
+                    'requirement': 'Only minimum necessary PHI should be disclosed'
+                })
+        
+        if violations:
+            return {
+                'hipaa_compliant': False,
+                'violations': violations,
+                'action': 'redact_phi_and_add_disclaimers'
+            }
+        
+        return {'hipaa_compliant': True}
+    
+    def _contains_medical_advice(self, text: str) -> bool:
+        """Detect if output provides medical advice"""
+        
+        medical_advice_patterns = [
+            r'(?i)you should (take|stop|start|continue)',
+            r'(?i)I (recommend|suggest|advise).*(medication|treatment|therapy)',
+            r'(?i)(diagnosis|diagnosed with|you have)',
+            r'(?i)this (cures|treats|heals)',
+        ]
+        
+        return any(re.search(pattern, text) for pattern in medical_advice_patterns)
+    
+    def _has_medical_disclaimer(self, text: str) -> bool:
+        """Check if medical disclaimer is present"""
+        
+        disclaimer_indicators = [
+            'not a substitute for professional medical advice',
+            'consult a healthcare provider',
+            'seek medical attention',
+            'this is not medical advice',
+            'talk to your doctor'
+        ]
+        
+        return any(indicator in text.lower() for indicator in disclaimer_indicators)
+    
+    def add_hipaa_disclaimers(self, output: str, violations: list) -> str:
+        """Add required HIPAA disclaimers"""
+        
+        disclaimers = []
+        
+        for violation in violations:
+            if violation['violation'] == 'medical_advice_without_disclaimer':
+                disclaimers.append(
+                    "⚕️ Medical Disclaimer: This information is for educational purposes "
+                    "only and is not a substitute for professional medical advice, diagnosis, "
+                    "or treatment. Always seek the advice of your physician or other qualified "
+                    "health provider with any questions you may have regarding a medical condition."
+                )
+        
+        if disclaimers:
+            disclaimer_text = "\n\n".join(disclaimers)
+            return f"{output}\n\n---\n\n{disclaimer_text}"
+        
+        return output
