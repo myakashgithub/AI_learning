@@ -1,0 +1,915 @@
+# File: guardrails/layer2/memory_access_controls.py
+
+from typing import Dict, List, Optional, Set, Any
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+import hashlib
+import secrets
+import logging
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
+
+logger = logging.getLogger(__name__)
+
+class AccessLevel(Enum):
+    """Access levels for different operations"""
+    NONE = 0
+    READ = 1
+    WRITE = 2
+    DELETE = 3
+    ADMIN = 4
+
+class ResourceType(Enum):
+    """Types of protected resources"""
+    CONVERSATION = "conversation"
+    DOCUMENT = "document"
+    PREFERENCE = "preference"
+    API_KEY = "api_key"
+    KNOWLEDGE_BASE = "knowledge_base"
+    TRAINING_DATA = "training_data"
+
+@dataclass
+class TenantContext:
+    """Tenant isolation context"""
+    tenant_id: str
+    organization_name: str
+    tier: str  # free, standard, enterprise
+    isolation_level: str  # shared, dedicated
+    encryption_key_id: str
+    created_at: datetime
+    
+@dataclass
+class UserContext:
+    """User identity and permissions"""
+    user_id: str
+    tenant_id: str
+    roles: List[str]
+    permissions: Set[str]
+    authentication_method: str
+    session_id: str
+    
+@dataclass
+class AccessAttempt:
+    """Record of access attempt for audit"""
+    attempt_id: str
+    user_id: str
+    tenant_id: str
+    resource_type: ResourceType
+    resource_id: str
+    operation: str
+    granted: bool
+    denial_reason: Optional[str]
+    timestamp: datetime
+    source_ip: str
+    user_agent: str
+
+@dataclass
+class EncryptedData:
+    """Encrypted data with metadata"""
+    ciphertext: bytes
+    encryption_key_id: str
+    algorithm: str
+    iv: bytes
+    created_at: datetime
+
+class MemoryAccessController:
+    """
+    Enforce memory access controls for multi-tenant AI systems.
+    
+    Features:
+    - Multi-tenant isolation
+    - Row-level security
+    - Encryption at rest
+    - Access logging and auditing
+    - Data minimization
+    - Cross-user protection
+    """
+    
+    def __init__(self, master_key: bytes = None):
+        # Tenant registry
+        self.tenants = {}  # {tenant_id: TenantContext}
+        
+        # User registry
+        self.users = {}  # {user_id: UserContext}
+        
+        # Access control lists
+        self.acls = {}  # {resource_id: {user_id: AccessLevel}}
+        
+        # Encryption keys per tenant
+        self.tenant_keys = {}  # {tenant_id: encryption_key}
+        
+        # Master encryption key
+        self.master_key = master_key or Fernet.generate_key()
+        self.cipher = Fernet(self.master_key)
+        
+        # Access audit log
+        self.access_log = []
+        
+        # Resource registry with tenant tagging
+        self.resources = {}  # {resource_id: {tenant_id, user_id, type, metadata}}
+        
+        # Data retention policies
+        self.retention_policies = self._define_retention_policies()
+        
+    def register_tenant(
+        self,
+        tenant_id: str,
+        organization_name: str,
+        tier: str = "standard",
+        isolation_level: str = "shared"
+    ) -> TenantContext:
+        """
+        Register a new tenant with isolated environment.
+        
+        Args:
+            tenant_id: Unique tenant identifier
+            organization_name: Organization name
+            tier: Service tier (free, standard, enterprise)
+            isolation_level: Level of isolation (shared, dedicated)
+            
+        Returns:
+            TenantContext
+        """
+        
+        # Generate tenant-specific encryption key
+        tenant_key = Fernet.generate_key()
+        encryption_key_id = hashlib.sha256(tenant_key).hexdigest()[:16]
+        
+        # Store tenant key (in production: use KMS)
+        self.tenant_keys[tenant_id] = tenant_key
+        
+        # Create tenant context
+        tenant_context = TenantContext(
+            tenant_id=tenant_id,
+            organization_name=organization_name,
+            tier=tier,
+            isolation_level=isolation_level,
+            encryption_key_id=encryption_key_id,
+            created_at=datetime.utcnow()
+        )
+        
+        self.tenants[tenant_id] = tenant_context
+        
+        logger.info(f"Tenant registered: {tenant_id} ({organization_name})")
+        
+        return tenant_context
+    
+    def register_user(
+        self,
+        user_id: str,
+        tenant_id: str,
+        roles: List[str],
+        authentication_method: str,
+        session_id: str
+    ) -> UserContext:
+        """
+        Register user within a tenant.
+        
+        Args:
+            user_id: Unique user identifier
+            tenant_id: Tenant the user belongs to
+            roles: User roles (e.g., admin, user, viewer)
+            authentication_method: How user authenticated
+            session_id: Current session identifier
+            
+        Returns:
+            UserContext
+        """
+        
+        if tenant_id not in self.tenants:
+            raise ValueError(f"Tenant not found: {tenant_id}")
+        
+        # Derive permissions from roles
+        permissions = self._get_permissions_for_roles(roles)
+        
+        user_context = UserContext(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            roles=roles,
+            permissions=permissions,
+            authentication_method=authentication_method,
+            session_id=session_id
+        )
+        
+        self.users[user_id] = user_context
+        
+        logger.info(f"User registered: {user_id} in tenant {tenant_id}")
+        
+        return user_context
+    
+    def check_access(
+        self,
+        user_id: str,
+        resource_id: str,
+        operation: str,
+        source_ip: str = "unknown",
+        user_agent: str = "unknown"
+    ) -> Dict:
+        """
+        Check if user has access to resource for operation.
+        
+        Args:
+            user_id: User requesting access
+            resource_id: Resource being accessed
+            operation: Operation type (read, write, delete)
+            source_ip: Source IP address
+            user_agent: User agent string
+            
+        Returns:
+            {
+                'granted': bool,
+                'reason': str,
+                'audit_id': str
+            }
+        """
+        
+        # Get user context
+        if user_id not in self.users:
+            return self._log_and_deny(
+                user_id, "unknown", resource_id, operation,
+                "User not found", source_ip, user_agent
+            )
+        
+        user = self.users[user_id]
+        
+        # Get resource
+        if resource_id not in self.resources:
+            return self._log_and_deny(
+                user_id, user.tenant_id, resource_id, operation,
+                "Resource not found", source_ip, user_agent
+            )
+        
+        resource = self.resources[resource_id]
+        
+        # CRITICAL: Tenant isolation check
+        if resource['tenant_id'] != user.tenant_id:
+            return self._log_and_deny(
+                user_id, user.tenant_id, resource_id, operation,
+                "Cross-tenant access denied (ISOLATION VIOLATION)",
+                source_ip, user_agent
+            )
+        
+        # User ownership check (for user-specific resources)
+        if 'user_id' in resource:
+            if resource['user_id'] != user_id:
+                # Check if user has permission to access other users' data
+                if 'access_all_users' not in user.permissions:
+                    return self._log_and_deny(
+                        user_id, user.tenant_id, resource_id, operation,
+                        "Cross-user access denied",
+                        source_ip, user_agent
+                    )
+        
+        # Operation-specific permission check
+        required_permission = f"{resource['type']}:{operation}"
+        if required_permission not in user.permissions:
+            return self._log_and_deny(
+                user_id, user.tenant_id, resource_id, operation,
+                f"Missing permission: {required_permission}",
+                source_ip, user_agent
+            )
+        
+        # ACL check (if ACLs are defined for this resource)
+        if resource_id in self.acls:
+            user_access_level = self.acls[resource_id].get(user_id, AccessLevel.NONE)
+            
+            required_level = {
+                'read': AccessLevel.READ,
+                'write': AccessLevel.WRITE,
+                'delete': AccessLevel.DELETE,
+                'admin': AccessLevel.ADMIN
+            }.get(operation, AccessLevel.ADMIN)
+            
+            if user_access_level.value < required_level.value:
+                return self._log_and_deny(
+                    user_id, user.tenant_id, resource_id, operation,
+                    f"Insufficient access level (required: {required_level.name})",
+                    source_ip, user_agent
+                )
+        
+        # Access granted - log and return
+        return self._log_and_grant(
+            user_id, user.tenant_id, resource_id, operation,
+            source_ip, user_agent
+        )
+    
+    def store_data(
+        self,
+        user_id: str,
+        resource_type: ResourceType,
+        data: Any,
+        metadata: Dict = None
+    ) -> str:
+        """
+        Store data with encryption and tenant tagging.
+        
+        Args:
+            user_id: User storing the data
+            resource_type: Type of resource
+            data: Data to store
+            metadata: Additional metadata
+            
+        Returns:
+            resource_id
+        """
+        
+        if user_id not in self.users:
+            raise ValueError(f"User not found: {user_id}")
+        
+        user = self.users[user_id]
+        
+        # Generate resource ID
+        resource_id = secrets.token_urlsafe(16)
+        
+        # Encrypt data using tenant key
+        encrypted_data = self._encrypt_data(data, user.tenant_id)
+        
+        # Store resource with tenant and user tags
+        self.resources[resource_id] = {
+            'tenant_id': user.tenant_id,
+            'user_id': user_id,
+            'type': resource_type.value,
+            'encrypted_data': encrypted_data,
+            'metadata': metadata or {},
+            'created_at': datetime.utcnow(),
+            'accessed_at': datetime.utcnow()
+        }
+        
+        logger.info(
+            f"Data stored: {resource_id} (type: {resource_type.value}, "
+            f"user: {user_id}, tenant: {user.tenant_id})"
+        )
+        
+        return resource_id
+    
+    def retrieve_data(
+        self,
+        user_id: str,
+        resource_id: str,
+        source_ip: str = "unknown"
+    ) -> Dict:
+        """
+        Retrieve data with access control and decryption.
+        
+        Args:
+            user_id: User retrieving data
+            resource_id: Resource to retrieve
+            source_ip: Source IP for audit
+            
+        Returns:
+            {
+                'success': bool,
+                'data': Any (if success),
+                'error': str (if failure)
+            }
+        """
+        
+        # Check access
+        access_check = self.check_access(
+            user_id, resource_id, 'read', source_ip
+        )
+        
+        if not access_check['granted']:
+            return {
+                'success': False,
+                'error': access_check['reason']
+            }
+        
+        # Get resource
+        resource = self.resources[resource_id]
+        user = self.users[user_id]
+        
+        # Decrypt data
+        try:
+            decrypted_data = self._decrypt_data(
+                resource['encrypted_data'],
+                user.tenant_id
+            )
+            
+            # Update access timestamp
+            resource['accessed_at'] = datetime.utcnow()
+            
+            return {
+                'success': True,
+                'data': decrypted_data,
+                'metadata': resource.get('metadata', {})
+            }
+            
+        except Exception as e:
+            logger.error(f"Decryption failed for {resource_id}: {e}")
+            return {
+                'success': False,
+                'error': 'Decryption failed'
+            }
+    
+    def delete_data(
+        self,
+        user_id: str,
+        resource_id: str,
+        source_ip: str = "unknown"
+    ) -> Dict:
+        """
+        Delete data with access control.
+        
+        Args:
+            user_id: User deleting data
+            resource_id: Resource to delete
+            source_ip: Source IP for audit
+            
+        Returns:
+            {
+                'success': bool,
+                'error': str (if failure)
+            }
+        """
+        
+        # Check access
+        access_check = self.check_access(
+            user_id, resource_id, 'delete', source_ip
+        )
+        
+        if not access_check['granted']:
+            return {
+                'success': False,
+                'error': access_check['reason']
+            }
+        
+        # Delete resource
+        del self.resources[resource_id]
+        
+        # Remove from ACLs if present
+        if resource_id in self.acls:
+            del self.acls[resource_id]
+        
+        logger.info(f"Data deleted: {resource_id} by user {user_id}")
+        
+        return {'success': True}
+    
+    def enforce_data_minimization(self):
+        """
+        Enforce data retention policies and delete old data.
+        
+        Returns:
+            Number of resources deleted
+        """
+        
+        deleted_count = 0
+        now = datetime.utcnow()
+        
+        resources_to_delete = []
+        
+        for resource_id, resource in self.resources.items():
+            resource_type = resource['type']
+            
+            # Get retention policy
+            if resource_type not in self.retention_policies:
+                continue
+            
+            retention_days = self.retention_policies[resource_type]
+            
+            # Check if resource has expired
+            age = now - resource['created_at']
+            
+            if age.days > retention_days:
+                resources_to_delete.append(resource_id)
+        
+        # Delete expired resources
+        for resource_id in resources_to_delete:
+            del self.resources[resource_id]
+            deleted_count += 1
+            
+            logger.info(f"Auto-deleted expired resource: {resource_id}")
+        
+        return deleted_count
+    
+    def get_access_audit_log(
+        self,
+        tenant_id: str = None,
+        user_id: str = None,
+        start_date: datetime = None,
+        end_date: datetime = None,
+        denied_only: bool = False
+    ) -> List[AccessAttempt]:
+        """
+        Retrieve access audit log with filters.
+        
+        Args:
+            tenant_id: Filter by tenant
+            user_id: Filter by user
+            start_date: Filter by start date
+            end_date: Filter by end date
+            denied_only: Only show denied attempts
+            
+        Returns:
+            List of AccessAttempt records
+        """
+        
+        filtered_log = self.access_log
+        
+        if tenant_id:
+            filtered_log = [
+                a for a in filtered_log
+                if a.tenant_id == tenant_id
+            ]
+        
+        if user_id:
+            filtered_log = [
+                a for a in filtered_log
+                if a.user_id == user_id
+            ]
+        
+        if start_date:
+            filtered_log = [
+                a for a in filtered_log
+                if a.timestamp >= start_date
+            ]
+        
+        if end_date:
+            filtered_log = [
+                a for a in filtered_log
+                if a.timestamp <= end_date
+            ]
+        
+        if denied_only:
+            filtered_log = [
+                a for a in filtered_log
+                if not a.granted
+            ]
+        
+        return filtered_log
+    
+    def detect_suspicious_access_patterns(
+        self,
+        user_id: str,
+        time_window_minutes: int = 60
+    ) -> Dict:
+        """
+        Detect suspicious access patterns for a user.
+        
+        Args:
+            user_id: User to analyze
+            time_window_minutes: Time window for analysis
+            
+        Returns:
+            {
+                'suspicious': bool,
+                'patterns': List[str],
+                'details': Dict
+            }
+        """
+        
+        # Get recent access attempts
+        cutoff = datetime.utcnow() - timedelta(minutes=time_window_minutes)
+        recent_attempts = [
+            a for a in self.access_log
+            if a.user_id == user_id and a.timestamp >= cutoff
+        ]
+        
+        if not recent_attempts:
+            return {
+                'suspicious': False,
+                'patterns': [],
+                'details': {}
+            }
+        
+        patterns = []
+        details = {}
+        
+        # Pattern 1: Excessive access attempts
+        if len(recent_attempts) > 100:
+            patterns.append('excessive_access')
+            details['access_count'] = len(recent_attempts)
+        
+        # Pattern 2: High denial rate
+        denied = [a for a in recent_attempts if not a.granted]
+        denial_rate = len(denied) / len(recent_attempts)
+        
+        if denial_rate > 0.5:  # More than 50% denied
+            patterns.append('high_denial_rate')
+            details['denial_rate'] = denial_rate
+        
+        # Pattern 3: Cross-tenant access attempts
+        cross_tenant_attempts = [
+            a for a in denied
+            if 'Cross-tenant' in (a.denial_reason or '')
+        ]
+        
+        if cross_tenant_attempts:
+            patterns.append('cross_tenant_attempts')
+            details['cross_tenant_count'] = len(cross_tenant_attempts)
+        
+        # Pattern 4: Bulk data access
+        unique_resources = set(a.resource_id for a in recent_attempts)
+        if len(unique_resources) > 50:
+            patterns.append('bulk_data_access')
+            details['unique_resources'] = len(unique_resources)
+        
+        # Pattern 5: After-hours access
+        after_hours = [
+            a for a in recent_attempts
+            if a.timestamp.hour < 6 or a.timestamp.hour > 22
+        ]
+        
+        if len(after_hours) > len(recent_attempts) * 0.8:
+            patterns.append('after_hours_access')
+            details['after_hours_percentage'] = len(after_hours) / len(recent_attempts)
+        
+        return {
+            'suspicious': len(patterns) > 0,
+            'patterns': patterns,
+            'details': details
+        }
+    
+    def _encrypt_data(self, data: Any, tenant_id: str) -> EncryptedData:
+        """Encrypt data using tenant-specific key"""
+        
+        import json
+        
+        # Get tenant key
+        if tenant_id not in self.tenant_keys:
+            raise ValueError(f"Tenant key not found: {tenant_id}")
+        
+        tenant_key = self.tenant_keys[tenant_id]
+        cipher = Fernet(tenant_key)
+        
+        # Serialize data
+        if isinstance(data, (dict, list)):
+            data_bytes = json.dumps(data).encode()
+        elif isinstance(data, str):
+            data_bytes = data.encode()
+        else:
+            data_bytes = str(data).encode()
+        
+        # Encrypt
+        ciphertext = cipher.encrypt(data_bytes)
+        
+        # Get tenant encryption key ID
+        tenant = self.tenants[tenant_id]
+        
+        return EncryptedData(
+            ciphertext=ciphertext,
+            encryption_key_id=tenant.encryption_key_id,
+            algorithm='Fernet-AES128',
+            iv=b'',  # Fernet includes IV in ciphertext
+            created_at=datetime.utcnow()
+        )
+    
+    def _decrypt_data(self, encrypted_data: EncryptedData, tenant_id: str) -> Any:
+        """Decrypt data using tenant-specific key"""
+        
+        import json
+        
+        # Get tenant key
+        if tenant_id not in self.tenant_keys:
+            raise ValueError(f"Tenant key not found: {tenant_id}")
+        
+        tenant_key = self.tenant_keys[tenant_id]
+        cipher = Fernet(tenant_key)
+        
+        # Decrypt
+        plaintext_bytes = cipher.decrypt(encrypted_data.ciphertext)
+        plaintext = plaintext_bytes.decode()
+        
+        # Try to deserialize as JSON
+        try:
+            return json.loads(plaintext)
+        except:
+            return plaintext
+    
+    def _log_and_deny(
+        self,
+        user_id: str,
+        tenant_id: str,
+        resource_id: str,
+        operation: str,
+        reason: str,
+        source_ip: str,
+        user_agent: str
+    ) -> Dict:
+        """Log denied access attempt"""
+        
+        attempt = AccessAttempt(
+            attempt_id=secrets.token_urlsafe(16),
+            user_id=user_id,
+            tenant_id=tenant_id,
+            resource_type=ResourceType.CONVERSATION,  # Default
+            resource_id=resource_id,
+            operation=operation,
+            granted=False,
+            denial_reason=reason,
+            timestamp=datetime.utcnow(),
+            source_ip=source_ip,
+            user_agent=user_agent
+        )
+        
+        self.access_log.append(attempt)
+        
+        logger.warning(
+            f"Access DENIED: {user_id} -> {resource_id} ({operation}): {reason}"
+        )
+        
+        return {
+            'granted': False,
+            'reason': reason,
+            'audit_id': attempt.attempt_id
+        }
+    
+    def _log_and_grant(
+        self,
+        user_id: str,
+        tenant_id: str,
+        resource_id: str,
+        operation: str,
+        source_ip: str,
+        user_agent: str
+    ) -> Dict:
+        """Log granted access attempt"""
+        
+        attempt = AccessAttempt(
+            attempt_id=secrets.token_urlsafe(16),
+            user_id=user_id,
+            tenant_id=tenant_id,
+            resource_type=ResourceType.CONVERSATION,  # Default
+            resource_id=resource_id,
+            operation=operation,
+            granted=True,
+            denial_reason=None,
+            timestamp=datetime.utcnow(),
+            source_ip=source_ip,
+            user_agent=user_agent
+        )
+        
+        self.access_log.append(attempt)
+        
+        logger.info(
+            f"Access GRANTED: {user_id} -> {resource_id} ({operation})"
+        )
+        
+        return {
+            'granted': True,
+            'reason': 'Access granted',
+            'audit_id': attempt.attempt_id
+        }
+    
+    def _get_permissions_for_roles(self, roles: List[str]) -> Set[str]:
+        """Map roles to permissions"""
+        
+        role_permissions = {
+            'admin': {
+                'conversation:read',
+                'conversation:write',
+                'conversation:delete',
+                'document:read',
+                'document:write',
+                'document:delete',
+                'preference:read',
+                'preference:write',
+                'api_key:read',
+                'api_key:write',
+                'knowledge_base:read',
+                'knowledge_base:write',
+                'access_all_users'  # Can access other users' data
+            },
+            'user': {
+                'conversation:read',
+                'conversation:write',
+                'conversation:delete',
+                'document:read',
+                'document:write',
+                'document:delete',
+                'preference:read',
+                'preference:write',
+                'api_key:read'
+            },
+            'viewer': {
+                'conversation:read',
+                'document:read',
+                'preference:read'
+            }
+        }
+        
+        permissions = set()
+        for role in roles:
+            if role in role_permissions:
+                permissions.update(role_permissions[role])
+        
+        return permissions
+    
+    def _define_retention_policies(self) -> Dict[str, int]:
+        """Define data retention policies in days"""
+        
+        return {
+            'conversation': 90,  # 90 days
+            'document': 30,      # 30 days for uploads
+            'preference': 365,   # 1 year
+            'api_key': 365,      # 1 year
+            'knowledge_base': 730,  # 2 years
+            'training_data': 730    # 2 years
+        }
+
+
+# Example usage
+if __name__ == "__main__":
+    controller = MemoryAccessController()
+    
+    # Register two separate tenants
+    tenant_a = controller.register_tenant(
+        tenant_id='tenant_company_a',
+        organization_name='Company A',
+        tier='enterprise'
+    )
+    
+    tenant_b = controller.register_tenant(
+        tenant_id='tenant_company_b',
+        organization_name='Company B',
+        tier='standard'
+    )
+    
+    print(f"Registered tenants:")
+    print(f"  Tenant A: {tenant_a.organization_name}")
+    print(f"  Tenant B: {tenant_b.organization_name}")
+    
+    # Register users in each tenant
+    user_a1 = controller.register_user(
+        user_id='user_alice',
+        tenant_id='tenant_company_a',
+        roles=['user'],
+        authentication_method='saml',
+        session_id='session_001'
+    )
+    
+    user_b1 = controller.register_user(
+        user_id='user_bob',
+        tenant_id='tenant_company_b',
+        roles=['user'],
+        authentication_method='oauth',
+        session_id='session_002'
+    )
+    
+    print(f"\nRegistered users:")
+    print(f"  Alice in Tenant A")
+    print(f"  Bob in Tenant B")
+    
+    # Alice stores conversation data
+    conversation_id = controller.store_data(
+        user_id='user_alice',
+        resource_type=ResourceType.CONVERSATION,
+        data={
+            'messages': [
+                {'role': 'user', 'content': 'Company A secret strategy'},
+                {'role': 'assistant', 'content': 'Response about strategy'}
+            ]
+        },
+        metadata={'topic': 'strategy'}
+    )
+    
+    print(f"\nAlice stored conversation: {conversation_id}")
+    
+    # Alice retrieves her own data - SHOULD SUCCEED
+    result = controller.retrieve_data(
+        user_id='user_alice',
+        resource_id=conversation_id,
+        source_ip='192.168.1.100'
+    )
+    
+    print(f"\nAlice retrieving her own data:")
+    print(f"  Success: {result['success']}")
+    if result['success']:
+        print(f"  Data: {result['data']['messages'][0]['content'][:30]}...")
+    
+    # Bob tries to access Alice's data - SHOULD FAIL
+    result = controller.retrieve_data(
+        user_id='user_bob',
+        resource_id=conversation_id,
+        source_ip='192.168.1.200'
+    )
+    
+    print(f"\nBob trying to access Alice's data:")
+    print(f"  Success: {result['success']}")
+    print(f"  Error: {result.get('error', 'N/A')}")
+    
+    # Check access audit log
+    denied_attempts = controller.get_access_audit_log(denied_only=True)
+    
+    print(f"\nAccess audit log (denied attempts):")
+    for attempt in denied_attempts:
+        print(f"  {attempt.user_id} -> {attempt.resource_id}")
+        print(f"    Reason: {attempt.denial_reason}")
+        print(f"    Time: {attempt.timestamp}")
+    
+    # Detect suspicious patterns
+    suspicious = controller.detect_suspicious_access_patterns('user_bob')
+    
+    print(f"\nSuspicious activity analysis for Bob:")
+    print(f"  Suspicious: {suspicious['suspicious']}")
+    print(f"  Patterns: {suspicious['patterns']}")
+    
+    # Enforce data minimization (simulate old data)
+    controller.resources[conversation_id]['created_at'] = datetime.utcnow() - timedelta(days=100)
+    
+    deleted_count = controller.enforce_data_minimization()
+    
+    print(f"\nData minimization enforcement:")
+    print(f"  Deleted {deleted_count} expired resources")
