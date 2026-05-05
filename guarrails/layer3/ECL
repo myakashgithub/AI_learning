@@ -1,0 +1,106 @@
+class UncertaintyQuantifier:
+    def analyze_confidence(self, output: str, sources: list, context: dict) -> dict:
+        """Analyze and quantify uncertainty in output"""
+        
+        # Extract claims
+        claims = extract_claims(output)
+        
+        confidence_scores = []
+        
+        for claim in claims:
+            # Calculate confidence based on multiple factors
+            confidence = self._calculate_claim_confidence(claim, sources, context)
+            confidence_scores.append({
+                'claim': claim,
+                'confidence': confidence,
+                'level': self._confidence_to_level(confidence)
+            })
+        
+        # Overall confidence
+        avg_confidence = sum(c['confidence'] for c in confidence_scores) / len(confidence_scores) if confidence_scores else 1.0
+        
+        # Determine if uncertainty markers needed
+        if avg_confidence < 0.7:
+            return {
+                'requires_uncertainty': True,
+                'confidence_level': self._confidence_to_level(avg_confidence),
+                'claims': confidence_scores,
+                'recommendation': 'add_hedging_language'
+            }
+        
+        return {'requires_uncertainty': False}
+    
+    def _calculate_claim_confidence(self, claim: str, sources: list, context: dict) -> float:
+        """Calculate confidence score for a claim"""
+        
+        confidence_factors = []
+        
+        # Factor 1: Source support
+        supporting_sources = find_supporting_sources(claim, sources)
+        source_score = min(len(supporting_sources) / 3, 1.0)  # 3+ sources = max
+        confidence_factors.append(('sources', source_score, 0.4))
+        
+        # Factor 2: Source credibility
+        if supporting_sources:
+            avg_credibility = sum(s.credibility for s in supporting_sources) / len(supporting_sources)
+            confidence_factors.append(('credibility', avg_credibility, 0.3))
+        
+        # Factor 3: Consensus among sources
+        if len(supporting_sources) > 1:
+            consensus_score = calculate_consensus(supporting_sources, claim)
+            confidence_factors.append(('consensus', consensus_score, 0.2))
+        
+        # Factor 4: Temporal relevance
+        recency_score = calculate_recency(supporting_sources)
+        confidence_factors.append(('recency', recency_score, 0.1))
+        
+        # Weighted average
+        total_confidence = sum(score * weight for name, score, weight in confidence_factors)
+        
+        return total_confidence
+    
+    def _confidence_to_level(self, confidence: float) -> str:
+        """Convert numeric confidence to categorical level"""
+        
+        if confidence >= 0.9:
+            return 'very_high'
+        elif confidence >= 0.75:
+            return 'high'
+        elif confidence >= 0.6:
+            return 'medium'
+        elif confidence >= 0.4:
+            return 'low'
+        else:
+            return 'very_low'
+    
+    def add_uncertainty_markers(self, output: str, confidence_level: str) -> str:
+        """Add appropriate hedging language"""
+        
+        markers = {
+            'very_low': [
+                "It's unclear whether",
+                "There is limited evidence that",
+                "This is speculative, but"
+            ],
+            'low': [
+                "It's possible that",
+                "Some sources suggest",
+                "Based on limited information"
+            ],
+            'medium': [
+                "It appears that",
+                "Evidence suggests",
+                "According to available information"
+            ]
+        }
+        
+        if confidence_level in ['very_low', 'low', 'medium']:
+            # Add appropriate marker
+            marker = random.choice(markers[confidence_level])
+            
+            # Insert at beginning of factual claims
+            # (Smart insertion logic here)
+            
+            return modified_output
+        
+        return output
