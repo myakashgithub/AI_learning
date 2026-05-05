@@ -1,0 +1,139 @@
+class AgeAppropriatenessChecker:
+    def __init__(self):
+        self.age_ratings = {
+            'everyone': {
+                'min_age': 0,
+                'max_violence': 0.1,
+                'max_sexual': 0.0,
+                'max_language': 0.1,
+                'prohibited_topics': ['alcohol', 'drugs', 'gambling', 'weapons']
+            },
+            
+            'everyone_10_plus': {
+                'min_age': 10,
+                'max_violence': 0.3,
+                'max_sexual': 0.0,
+                'max_language': 0.2,
+                'prohibited_topics': ['alcohol', 'drugs', 'gambling']
+            },
+            
+            'teen': {
+                'min_age': 13,
+                'max_violence': 0.5,
+                'max_sexual': 0.1,
+                'max_language': 0.4,
+                'prohibited_topics': ['explicit_violence', 'sexual_content']
+            },
+            
+            'mature': {
+                'min_age': 17,
+                'max_violence': 0.7,
+                'max_sexual': 0.4,
+                'max_language': 0.7,
+                'prohibited_topics': ['explicit_sexual', 'graphic_violence']
+            },
+            
+            'adult': {
+                'min_age': 18,
+                'max_violence': 1.0,
+                'max_sexual': 1.0,
+                'max_language': 1.0,
+                'prohibited_topics': []
+            }
+        }
+    
+    def check_age_appropriateness(self, output: str, user_age: int) -> dict:
+        """Check if content is appropriate for user's age"""
+        
+        # Determine user's age category
+        user_category = self._get_age_category(user_age)
+        rating_requirements = self.age_ratings[user_category]
+        
+        # Analyze content
+        content_scores = {
+            'violence': self._score_violence(output),
+            'sexual': self._score_sexual_content(output),
+            'language': self._score_language(output),
+            'topics': self._detect_topics(output)
+        }
+        
+        violations = []
+        
+        # Check violence level
+        if content_scores['violence'] > rating_requirements['max_violence']:
+            violations.append({
+                'violation': 'excessive_violence',
+                'score': content_scores['violence'],
+                'threshold': rating_requirements['max_violence'],
+                'severity': 'high'
+            })
+        
+        # Check sexual content
+        if content_scores['sexual'] > rating_requirements['max_sexual']:
+            violations.append({
+                'violation': 'sexual_content',
+                'score': content_scores['sexual'],
+                'threshold': rating_requirements['max_sexual'],
+                'severity': 'high'
+            })
+        
+        # Check language
+        if content_scores['language'] > rating_requirements['max_language']:
+            violations.append({
+                'violation': 'inappropriate_language',
+                'score': content_scores['language'],
+                'threshold': rating_requirements['max_language'],
+                'severity': 'medium'
+            })
+        
+        # Check prohibited topics
+        prohibited = rating_requirements['prohibited_topics']
+        found_prohibited = [topic for topic in content_scores['topics'] 
+                           if topic in prohibited]
+        
+        if found_prohibited:
+            violations.append({
+                'violation': 'prohibited_topics',
+                'topics': found_prohibited,
+                'severity': 'high'
+            })
+        
+        if violations:
+            return {
+                'age_appropriate': False,
+                'user_age': user_age,
+                'content_rating': self._calculate_content_rating(content_scores),
+                'violations': violations,
+                'action': 'block_or_modify'
+            }
+        
+        return {'age_appropriate': True}
+    
+    def _get_age_category(self, age: int) -> str:
+        """Determine age category"""
+        
+        if age < 10:
+            return 'everyone'
+        elif age < 13:
+            return 'everyone_10_plus'
+        elif age < 17:
+            return 'teen'
+        elif age < 18:
+            return 'mature'
+        else:
+            return 'adult'
+    
+    def _calculate_content_rating(self, scores: dict) -> str:
+        """Calculate overall content rating"""
+        
+        max_violence = scores['violence']
+        max_sexual = scores['sexual']
+        max_language = scores['language']
+        
+        for rating_name, requirements in self.age_ratings.items():
+            if (max_violence <= requirements['max_violence'] and
+                max_sexual <= requirements['max_sexual'] and
+                max_language <= requirements['max_language']):
+                return rating_name
+        
+        return 'adult'
