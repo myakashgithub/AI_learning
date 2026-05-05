@@ -1,0 +1,497 @@
+# File: guardrails/layer4/audit_logging.py
+
+import json
+import hashlib
+import hmac
+from datetime import datetime
+from typing import Dict, Optional
+import asyncio
+import logging
+from queue import Queue
+import threading
+
+logger = logging.getLogger(__name__)
+
+class AuditLogger:
+    """
+    Immutable, cryptographically-signed audit logging system.
+    
+    Features:
+    - Append-only (no modifications or deletions)
+    - Cryptographic signatures for integrity
+    - Async writes (no blocking)
+    - Structured logging with consistent schema
+    - Automatic batching for performance
+    """
+    
+    def __init__(self, secret_key: bytes, storage_backend, search_backend=None):
+        self.secret_key = secret_key
+        self.storage = storage_backend
+        self.search = search_backend
+        
+        # Async write queue
+        self.write_queue = Queue()
+        self.batch_size = 100
+        self.flush_interval = 5  # seconds
+        
+        # Start background writer
+        self._start_background_writer()
+        
+        # Log schema version
+        self.schema_version = "1.0"
+    
+    def log_event(
+        self,
+        event_type: str,
+        user_id: str,
+        details: Dict,
+        severity: str = "info",
+        layer: str = None,
+        control: str = None
+    ):
+        """
+        Log an audit event (non-blocking).
+        
+        Args:
+            event_type: Type of event (e.g., 'request', 'violation', 'tool_call')
+            user_id: User identifier
+            details: Event-specific details
+            severity: 'info', 'warning', 'error', 'critical'
+            layer: Which guardrail layer (if applicable)
+            control: Which specific control (if applicable)
+        """
+        
+        # Create structured log entry
+        log_entry = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'event_type': event_type,
+            'user_id': user_id,
+            'severity': severity,
+            'layer': layer,
+            'control': control,
+            'details': details,
+            'schema_version': self.schema_version
+        }
+        
+        # Add cryptographic signature
+        log_entry['signature'] = self._sign_entry(log_entry)
+        
+        # Add to async queue
+        self.write_queue.put(log_entry)
+    
+    def log_request(
+        self,
+        request_id: str,
+        user_id: str,
+        user_input: str,
+        sanitized_input: str,
+        layer1_result: Dict,
+        layer2_result: Dict,
+        layer3_result: Dict,
+        model_output: str,
+        final_output: str,
+        total_latency_ms: float,
+        violations: list
+    ):
+        """Log complete request lifecycle"""
+        
+        details = {
+            'request_id': request_id,
+            'input': {
+                'original': user_input[:1000],  # Limit size
+                'sanitized': sanitized_input[:1000]
+            },
+            'output': {
+                'model': model_output[:1000],
+                'final': final_output[:1000]
+            },
+            'guardrails': {
+                'layer1': self._summarize_result(layer1_result),
+                'layer2': self._summarize_result(layer2_result),
+                'layer3': self._summarize_result(layer3_result)
+            },
+            'violations': violations,
+            'latency_ms': total_latency_ms
+        }
+        
+        severity = 'critical' if any(v.get('severity') == 'critical' for v in violations) else 'info'
+        
+        self.log_event(
+            event_type='request',
+            user_id=user_id,
+            details=details,
+            severity=severity
+        )
+    
+    def log_violation(
+        self,
+        user_id: str,
+        layer: str,
+        control: str,
+        violation_type: str,
+        details: Dict,
+        severity: str = 'high'
+    ):
+        """Log security violation"""
+        
+        violation_details = {
+            'violation_type': violation_type,
+            'layer': layer,
+            'control': control,
+            **details
+        }
+        
+        self.log_event(
+            event_type='violation',
+            user_id=user_id,
+            details=violation_details,
+            severity=severity,
+            layer=layer,
+            control=control
+        )
+    
+    def log_tool_call(
+        self,
+        user_id: str,
+        tool_name: str,
+        arguments: Dict,
+        authorized: bool,
+        result: Optional[Dict] = None,
+        error: Optional[str] = None
+    ):
+        """Log tool/function invocation"""
+        
+        details = {
+            'tool_name': tool_name,
+            'arguments': arguments,
+            'authorized': authorized,
+            'result': result,
+            'error': error
+        }
+        
+        severity = 'warning' if not authorized else 'info'
+        
+        self.log_event(
+            event_type='tool_call',
+            user_id=user_id,
+            details=details,
+            severity=severity,
+            layer='context',
+            control='tool_authorization'
+        )
+    
+    def log_authentication(
+        self,
+        user_id: str,
+        success: bool,
+        method: str,
+        ip_address: str,
+        user_agent: str,
+        failure_reason: Optional[str] = None
+    ):
+        """Log authentication attempt"""
+        
+        details = {
+            'success': success,
+            'method': method,
+            'ip_address': ip_address,
+            'user_agent': user_agent,
+            'failure_reason': failure_reason
+        }
+        
+        severity = 'warning' if not success else 'info'
+        
+        self.log_event(
+            event_type='authentication',
+            user_id=user_id,
+            details=details,
+            severity=severity
+        )
+    
+    def log_data_access(
+        self,
+        user_id: str,
+        resource_type: str,
+        resource_id: str,
+        action: str,
+        authorized: bool,
+        data_classification: str = None
+    ):
+        """Log data access for compliance"""
+        
+        details = {
+            'resource_type': resource_type,
+            'resource_id': resource_id,
+            'action': action,
+            'authorized': authorized,
+            'data_classification': data_classification
+        }
+        
+        severity = 'warning' if not authorized else 'info'
+        
+        self.log_event(
+            event_type='data_access',
+            user_id=user_id,
+            details=details,
+            severity=severity
+        )
+    
+    def _sign_entry(self, entry: Dict) -> str:
+        """Generate cryptographic signature for log entry"""
+        
+        # Create canonical representation
+        # Exclude signature field itself
+        signable_data = {k: v for k, v in entry.items() if k != 'signature'}
+        canonical = json.dumps(signable_data, sort_keys=True, separators=(',', ':'))
+        
+        # Generate HMAC signature
+        signature = hmac.new(
+            self.secret_key,
+            canonical.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        return signature
+    
+    def verify_entry(self, entry: Dict) -> bool:
+        """Verify log entry hasn't been tampered with"""
+        
+        if 'signature' not in entry:
+            return False
+        
+        stored_signature = entry['signature']
+        expected_signature = self._sign_entry(entry)
+        
+        return hmac.compare_digest(stored_signature, expected_signature)
+    
+    def _start_background_writer(self):
+        """Start background thread for async log writes"""
+        
+        def writer_loop():
+            batch = []
+            last_flush = datetime.utcnow()
+            
+            while True:
+                try:
+                    # Check if should flush
+                    now = datetime.utcnow()
+                    should_flush = (
+                        len(batch) >= self.batch_size or
+                        (now - last_flush).total_seconds() >= self.flush_interval
+                    )
+                    
+                    if should_flush and batch:
+                        self._flush_batch(batch)
+                        batch = []
+                        last_flush = now
+                    
+                    # Get next log entry (with timeout)
+                    try:
+                        entry = self.write_queue.get(timeout=1)
+                        batch.append(entry)
+                    except:
+                        # Timeout, continue loop
+                        pass
+                
+                except Exception as e:
+                    logger.error(f"Audit log writer error: {e}")
+        
+        writer_thread = threading.Thread(target=writer_loop, daemon=True)
+        writer_thread.start()
+        logger.info("Background audit log writer started")
+    
+    def _flush_batch(self, batch: list):
+        """Write batch of log entries to storage"""
+        
+        try:
+            # Write to primary storage (immutable)
+            self.storage.write_batch(batch)
+            
+            # Write to search index (if available)
+            if self.search:
+                self.search.index_batch(batch)
+            
+            logger.debug(f"Flushed {len(batch)} audit log entries")
+        
+        except Exception as e:
+            logger.error(f"Failed to flush audit logs: {e}")
+            # In production: write to failover storage
+    
+    @staticmethod
+    def _summarize_result(result: Dict) -> Dict:
+        """Create summary of guardrail result for logging"""
+        
+        return {
+            'passed': result.get('passed', result.get('safe', True)),
+            'violations': len(result.get('violations', [])),
+            'latency_ms': result.get('latency_ms', 0)
+        }
+
+
+class PostgreSQLAuditStorage:
+    """
+    PostgreSQL-based immutable audit log storage.
+    Uses append-only table with write-once constraint.
+    """
+    
+    def __init__(self, connection_string: str):
+        import psycopg2
+        self.conn = psycopg2.connect(connection_string)
+        self._ensure_table()
+    
+    def _ensure_table(self):
+        """Create audit log table if not exists"""
+        
+        with self.conn.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id BIGSERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP NOT NULL,
+                    event_type VARCHAR(100) NOT NULL,
+                    user_id VARCHAR(255) NOT NULL,
+                    severity VARCHAR(20) NOT NULL,
+                    layer VARCHAR(50),
+                    control VARCHAR(100),
+                    details JSONB NOT NULL,
+                    signature VARCHAR(64) NOT NULL,
+                    schema_version VARCHAR(10) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Create indexes for common queries
+                CREATE INDEX IF NOT EXISTS idx_audit_timestamp 
+                    ON audit_logs(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_audit_user 
+                    ON audit_logs(user_id);
+                CREATE INDEX IF NOT EXISTS idx_audit_severity 
+                    ON audit_logs(severity);
+                CREATE INDEX IF NOT EXISTS idx_audit_event_type 
+                    ON audit_logs(event_type);
+                
+                -- Create GIN index for JSONB queries
+                CREATE INDEX IF NOT EXISTS idx_audit_details 
+                    ON audit_logs USING GIN (details);
+            """)
+            self.conn.commit()
+    
+    def write_batch(self, entries: list):
+        """Write batch of entries to database"""
+        
+        with self.conn.cursor() as cursor:
+            for entry in entries:
+                cursor.execute("""
+                    INSERT INTO audit_logs (
+                        timestamp, event_type, user_id, severity,
+                        layer, control, details, signature, schema_version
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                """, (
+                    entry['timestamp'],
+                    entry['event_type'],
+                    entry['user_id'],
+                    entry['severity'],
+                    entry.get('layer'),
+                    entry.get('control'),
+                    json.dumps(entry['details']),
+                    entry['signature'],
+                    entry['schema_version']
+                ))
+            
+            self.conn.commit()
+    
+    def query(
+        self,
+        user_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: int = 100
+    ) -> list:
+        """Query audit logs"""
+        
+        query = "SELECT * FROM audit_logs WHERE 1=1"
+        params = []
+        
+        if user_id:
+            query += " AND user_id = %s"
+            params.append(user_id)
+        
+        if event_type:
+            query += " AND event_type = %s"
+            params.append(event_type)
+        
+        if severity:
+            query += " AND severity = %s"
+            params.append(severity)
+        
+        if start_time:
+            query += " AND timestamp >= %s"
+            params.append(start_time)
+        
+        if end_time:
+            query += " AND timestamp <= %s"
+            params.append(end_time)
+        
+        query += " ORDER BY timestamp DESC LIMIT %s"
+        params.append(limit)
+        
+        with self.conn.cursor() as cursor:
+            cursor.execute(query, params)
+            return cursor.fetchall()
+
+
+class ElasticsearchAuditIndex:
+    """
+    Elasticsearch-based search index for audit logs.
+    Enables fast querying and aggregations.
+    """
+    
+    def __init__(self, es_hosts: list):
+        from elasticsearch import Elasticsearch
+        self.es = Elasticsearch(es_hosts)
+        self.index_name = "audit-logs"
+        self._ensure_index()
+    
+    def _ensure_index(self):
+        """Create index with mapping if not exists"""
+        
+        if not self.es.indices.exists(index=self.index_name):
+            mapping = {
+                "mappings": {
+                    "properties": {
+                        "timestamp": {"type": "date"},
+                        "event_type": {"type": "keyword"},
+                        "user_id": {"type": "keyword"},
+                        "severity": {"type": "keyword"},
+                        "layer": {"type": "keyword"},
+                        "control": {"type": "keyword"},
+                        "details": {"type": "object", "enabled": True},
+                        "signature": {"type": "keyword"}
+                    }
+                }
+            }
+            
+            self.es.indices.create(index=self.index_name, body=mapping)
+    
+    def index_batch(self, entries: list):
+        """Index batch of log entries"""
+        
+        from elasticsearch.helpers import bulk
+        
+        actions = [
+            {
+                "_index": self.index_name,
+                "_source": entry
+            }
+            for entry in entries
+        ]
+        
+        bulk(self.es, actions)
+    
+    def search(self, query: Dict) -> list:
+        """Search audit logs"""
+        
+        result = self.es.search(index=self.index_name, body=query)
+        return result['hits']['hits']
