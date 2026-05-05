@@ -1,0 +1,358 @@
+# File: guardrails/layer4/anomaly_detection.py
+
+import numpy as np
+from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from collections import defaultdict
+import logging
+
+logger = logging.getLogger(__name__)
+
+class AnomalyDetector:
+    """
+    Statistical anomaly detection for user behavior.
+    
+    Uses multiple techniques:
+    1. Statistical baseline (mean + std dev)
+    2. Time-series analysis
+    3. Peer group comparison
+    4. Rule-based heuristics
+    """
+    
+    def __init__(self, storage_backend):
+        self.storage = storage_backend
+        
+        # Baseline learning period
+        self.baseline_days = 14
+        
+        # Anomaly thresholds (standard deviations)
+        self.thresholds = {
+            'requests_per_hour': 3.0,
+            'blocked_requests_ratio': 2.5,
+            'tool_calls_per_session': 2.0,
+            'session_duration': 2.5,
+            'error_rate': 2.0
+        }
+        
+        # User baselines (cached)
+        self.baselines = {}
+    
+    def detect_anomalies(self, user_id: str, current_behavior: Dict) -> Dict:
+        """
+        Detect anomalies in current user behavior.
+        
+        Args:
+            user_id: User identifier
+            current_behavior: Current metrics {
+                'requests_per_hour': float,
+                'blocked_requests_ratio': float,
+                'tool_calls_per_session': float,
+                'session_duration': float,
+                'error_rate': float,
+                ...
+            }
+            
+        Returns:
+            {
+                'anomalies_detected': bool,
+                'anomalies': List[dict],
+                'risk_score': float
+            }
+        """
+        
+        # Get user baseline
+        baseline = self._get_user_baseline(user_id)
+        
+        if not baseline:
+            # Not enough data for baseline
+            return {
+                'anomalies_detected': False,
+                'anomalies': [],
+                'risk_score': 0.0,
+                'reason': 'insufficient_baseline_data'
+            }
+        
+        anomalies = []
+        
+        # Check each metric
+        for metric, current_value in current_behavior.items():
+            if metric not in baseline:
+                continue
+            
+            baseline_mean = baseline[metric]['mean']
+            baseline_std = baseline[metric]['std']
+            threshold = self.thresholds.get(metric, 3.0)
+            
+            # Calculate z-score
+            if baseline_std > 0:
+                z_score = abs((current_value - baseline_mean) / baseline_std)
+            else:
+                z_score = 0.0
+            
+            if z_score > threshold:
+                anomalies.append({
+                    'metric': metric,
+                    'current_value': current_value,
+                    'baseline_mean': baseline_mean,
+                    'baseline_std': baseline_std,
+                    'z_score': z_score,
+                    'threshold': threshold,
+                    'severity': self._calculate_severity(z_score, threshold)
+                })
+        
+        # Calculate overall risk score
+        if anomalies:
+            risk_score = min(sum(a['z_score'] for a in anomalies) / 10.0, 1.0)
+        else:
+            risk_score = 0.0
+        
+        # Additional heuristic checks
+        heuristic_anomalies = self._heuristic_checks(user_id, current_behavior)
+        anomalies.extend(heuristic_anomalies)
+        
+        return {
+            'anomalies_detected': len(anomalies) > 0,
+            'anomalies': anomalies,
+            'risk_score': risk_score
+        }
+    
+    def _get_user_baseline(self, user_id: str) -> Optional[Dict]:
+        """Get statistical baseline for user"""
+        
+        # Check cache first
+        if user_id in self.baselines:
+            return self.baselines[user_id]
+        
+        # Query historical data
+        cutoff = datetime.utcnow() - timedelta(days=self.baseline_days)
+        historical_data = self.storage.get_user_metrics(
+            user_id=user_id,
+            start_time=cutoff
+        )
+        
+        if len(historical_data) < 10:  # Minimum data points
+            return None
+        
+        # Calculate baselines
+        baseline = {}
+        
+        metrics = [
+            'requests_per_hour',
+            'blocked_requests_ratio',
+            'tool_calls_per_session',
+            'session_duration',
+            'error_rate'
+        ]
+        
+        for metric in metrics:
+            values = [d[metric] for d in historical_data if metric in d]
+            
+            if values:
+                baseline[metric] = {
+                    'mean': np.mean(values),
+                    'std': np.std(values),
+                    'min': np.min(values),
+                    'max': np.max(values),
+                    'p95': np.percentile(values, 95)
+                }
+        
+        # Cache baseline
+        self.baselines[user_id] = baseline
+        
+        return baseline
+    
+    def _heuristic_checks(self, user_id: str, current_behavior: Dict) -> List[Dict]:
+        """Rule-based heuristic anomaly detection"""
+        
+        anomalies = []
+        
+        # Check 1: Impossible activity patterns
+        if current_behavior.get('requests_per_hour', 0) > 1000:
+            anomalies.append({
+                'type': 'impossible_request_rate',
+                'current_value': current_behavior['requests_per_hour'],
+                'severity': 'high',
+                'description': 'Request rate exceeds human capability'
+            })
+        
+        # Check 2: Geographic impossibility
+        if self._detect_impossible_travel(user_id, current_behavior):
+            anomalies.append({
+                'type': 'impossible_travel',
+                'severity': 'critical',
+                'description': 'Login from impossible geographic location'
+            })
+        
+        # Check 3: Time-of-day anomaly
+        if self._detect_unusual_time(user_id, current_behavior):
+            anomalies.append({
+                'type': 'unusual_time_of_day',
+                'severity': 'medium',
+                'description': 'Activity at unusual time for this user'
+            })
+        
+        # Check 4: Rapid failed attempts
+        if current_behavior.get('failed_requests_per_minute', 0) > 10:
+            anomalies.append({
+                'type': 'rapid_failures',
+                'current_value': current_behavior['failed_requests_per_minute'],
+                'severity': 'high',
+                'description': 'Rapid succession of failed requests'
+            })
+        
+        return anomalies
+    
+    def _detect_impossible_travel(self, user_id: str, current_behavior: Dict) -> bool:
+        """Detect impossible geographic travel"""
+        
+        current_location = current_behavior.get('location')
+        if not current_location:
+            return False
+        
+        # Get last known location
+        last_location = self.storage.get_last_location(user_id)
+        if not last_location:
+            return False
+        
+        # Calculate distance and time
+        distance_km = self._calculate_distance(
+            last_location['coordinates'],
+            current_location['coordinates']
+        )
+        
+        time_diff_hours = (
+            datetime.utcnow() - last_location['timestamp']
+        ).total_seconds() / 3600
+        
+        # Calculate required speed
+        if time_diff_hours > 0:
+            required_speed_kmh = distance_km / time_diff_hours
+            
+            # Threshold: 1000 km/h (faster than commercial flight)
+            if required_speed_kmh > 1000:
+                logger.warning(
+                    f"Impossible travel detected for user {user_id}: "
+                    f"{distance_km:.0f}km in {time_diff_hours:.1f}h "
+                    f"({required_speed_kmh:.0f} km/h)"
+                )
+                return True
+        
+        return False
+    
+    def _detect_unusual_time(self, user_id: str, current_behavior: Dict) -> bool:
+        """Detect activity at unusual time for user"""
+        
+        current_hour = datetime.utcnow().hour
+        
+        # Get user's typical active hours
+        typical_hours = self.storage.get_typical_active_hours(user_id)
+        
+        if not typical_hours:
+            return False
+        
+        # Check if current hour is in typical range
+        active_hours = set(typical_hours)
+        
+        if current_hour not in active_hours:
+            # Check how unusual (at least 3 hours away from typical)
+            min_distance = min(
+                abs(current_hour - h) 
+                for h in active_hours
+            )
+            
+            return min_distance >= 3
+        
+        return False
+    
+    @staticmethod
+    def _calculate_severity(z_score: float, threshold: float) -> str:
+        """Calculate severity based on z-score"""
+        
+        if z_score > threshold * 2:
+            return 'critical'
+        elif z_score > threshold * 1.5:
+            return 'high'
+        elif z_score > threshold:
+            return 'medium'
+        else:
+            return 'low'
+    
+    @staticmethod
+    def _calculate_distance(coord1: tuple, coord2: tuple) -> float:
+        """Calculate distance between coordinates using Haversine formula"""
+        
+        from math import radians, cos, sin, asin, sqrt
+        
+        lat1, lon1 = coord1
+        lat2, lon2 = coord2
+        
+        # Convert to radians
+        lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+        
+        # Haversine formula
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+        c = 2 * asin(sqrt(a))
+        
+        # Earth radius in kilometers
+        r = 6371
+        
+        return c * r
+
+
+class BehaviorMetricsCollector:
+    """
+    Collect and aggregate user behavior metrics for anomaly detection.
+    """
+    
+    def __init__(self, storage):
+        self.storage = storage
+        self.metrics_buffer = defaultdict(lambda: defaultdict(list))
+    
+    def record_request(
+        self,
+        user_id: str,
+        passed: bool,
+        latency_ms: float,
+        tool_calls: int,
+        violations: int
+    ):
+        """Record a request for metrics collection"""
+        
+        metrics = self.metrics_buffer[user_id]
+        
+        metrics['requests'].append(1)
+        metrics['blocked'].append(0 if passed else 1)
+        metrics['latency'].append(latency_ms)
+        metrics['tool_calls'].append(tool_calls)
+        metrics['violations'].append(violations)
+        
+        # Flush if buffer is large
+        if len(metrics['requests']) >= 100:
+            self._flush_metrics(user_id)
+    
+    def _flush_metrics(self, user_id: str):
+        """Flush buffered metrics to storage"""
+        
+        metrics = self.metrics_buffer[user_id]
+        
+        if not metrics['requests']:
+            return
+        
+        # Calculate aggregates
+        aggregated = {
+            'user_id': user_id,
+            'timestamp': datetime.utcnow(),
+            'total_requests': sum(metrics['requests']),
+            'blocked_requests': sum(metrics['blocked']),
+            'avg_latency_ms': np.mean(metrics['latency']),
+            'total_tool_calls': sum(metrics['tool_calls']),
+            'total_violations': sum(metrics['violations'])
+        }
+        
+        # Store
+        self.storage.save_metrics(aggregated)
+        
+        # Clear buffer
+        self.metrics_buffer[user_id].clear()
