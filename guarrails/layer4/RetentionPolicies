@@ -1,0 +1,79 @@
+# File: guardrails/layer4/retention.py
+
+from datetime import datetime, timedelta
+from typing import Dict
+import logging
+
+logger = logging.getLogger(__name__)
+
+class AuditLogRetentionManager:
+    """
+    Manage audit log retention and archival.
+    
+    Retention periods by compliance requirement:
+    - GDPR: 6 months to 2 years (varies by purpose)
+    - SOX: 7 years
+    - HIPAA: 6 years
+    - PCI-DSS: 1 year
+    """
+    
+    def __init__(self, storage, archive_storage):
+        self.storage = storage
+        self.archive = archive_storage
+        
+        # Define retention policies
+        self.policies = {
+            'general': {
+                'hot_storage_days': 90,      # Fast access
+                'warm_storage_days': 365,    # Medium access
+                'archive_storage_years': 7,  # Long-term
+                'deletion_after_years': 7
+            },
+            
+            'pii_related': {
+                'hot_storage_days': 30,
+                'warm_storage_days': 180,
+                'archive_storage_years': 2,
+                'deletion_after_years': 2
+            },
+            
+            'security_incident': {
+                'hot_storage_days': 365,
+                'warm_storage_days': 1825,   # 5 years
+                'archive_storage_years': 10,
+                'deletion_after_years': 10
+            }
+        }
+    
+    def apply_retention_policies(self):
+        """Run retention policy enforcement"""
+        
+        now = datetime.utcnow()
+        
+        for policy_name, policy in self.policies.items():
+            # Move to warm storage
+            warm_cutoff = now - timedelta(days=policy['hot_storage_days'])
+            self._move_to_warm_storage(policy_name, warm_cutoff)
+            
+            # Move to archive
+            archive_cutoff = now - timedelta(days=policy['warm_storage_days'])
+            self._move_to_archive(policy_name, archive_cutoff)
+            
+            # Delete expired logs
+            deletion_cutoff = now - timedelta(days=policy['deletion_after_years'] * 365)
+            self._delete_expired_logs(policy_name, deletion_cutoff)
+    
+    def _move_to_warm_storage(self, policy_name: str, cutoff: datetime):
+        """Move logs from hot to warm storage"""
+        logger.info(f"Moving {policy_name} logs to warm storage (before {cutoff})")
+        # Implementation here
+    
+    def _move_to_archive(self, policy_name: str, cutoff: datetime):
+        """Move logs from warm to archive storage"""
+        logger.info(f"Moving {policy_name} logs to archive (before {cutoff})")
+        # Implementation here
+    
+    def _delete_expired_logs(self, policy_name: str, cutoff: datetime):
+        """Delete logs past retention period"""
+        logger.info(f"Deleting expired {policy_name} logs (before {cutoff})")
+        # Implementation here
