@@ -1,0 +1,95 @@
+class SexualContentFilter:
+    def __init__(self):
+        self.content_categories = {
+            'always_blocked': {
+                'description': 'Never acceptable in any context',
+                'categories': [
+                    'sexual_content_minors',  # Zero tolerance
+                    'non_consensual_sexual',
+                    'sexual_violence',
+                    'revenge_porn',
+                    'sexual_exploitation'
+                ],
+                'threshold': 0.0,
+                'action': 'block_and_report'
+            },
+            
+            'context_dependent': {
+                'description': 'May be acceptable in specific contexts',
+                'categories': [
+                    'explicit_sexual_content',
+                    'sexual_language',
+                    'adult_themes'
+                ],
+                'allowed_contexts': ['sexual_health', 'medical', 'education'],
+                'threshold': 0.80,
+                'action': 'context_check'
+            },
+            
+            'educational_medical': {
+                'description': 'Medical/educational sexual content',
+                'categories': [
+                    'reproductive_health',
+                    'sexual_health_education',
+                    'anatomical_terminology',
+                    'medical_procedures'
+                ],
+                'threshold': 0.60,
+                'action': 'allow_with_framing'
+            }
+        }
+    
+    def filter_sexual_content(self, text: str, context: dict) -> dict:
+        """Filter sexual content based on context"""
+        
+        # Always block categories (absolute)
+        always_blocked = self._check_always_blocked(text)
+        if always_blocked['detected']:
+            return {
+                'allowed': False,
+                'reason': 'prohibited_content',
+                'category': always_blocked['category'],
+                'action': 'block_and_escalate',
+                'severity': 'critical'
+            }
+        
+        # Check context-dependent categories
+        sexual_score = self._classify_sexual_content(text)
+        
+        if sexual_score < 0.60:
+            return {'allowed': True, 'requires_warning': False}
+        
+        # Determine if context makes it acceptable
+        user_age = context.get('user_age')
+        purpose = context.get('purpose')
+        domain = context.get('domain')
+        
+        # Block for minors
+        if user_age and user_age < 18:
+            if sexual_score > 0.70:
+                return {
+                    'allowed': False,
+                    'reason': 'age_restriction',
+                    'action': 'block'
+                }
+        
+        # Allow for medical/educational contexts
+        if domain in ['healthcare', 'medical', 'education']:
+            if purpose in ['health_education', 'medical_consultation']:
+                # Check for appropriate framing
+                if self._has_clinical_framing(text):
+                    return {
+                        'allowed': True,
+                        'requires_disclaimer': True,
+                        'disclaimer_type': 'medical_education'
+                    }
+        
+        # Default: block explicit sexual content
+        if sexual_score > 0.80:
+            return {
+                'allowed': False,
+                'reason': 'explicit_content',
+                'action': 'block'
+            }
+        
+        return {'allowed': True, 'requires_warning': True}
