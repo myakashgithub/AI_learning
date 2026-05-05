@@ -1,0 +1,146 @@
+class CitationRequirement:
+    def __init__(self):
+        self.citation_required_domains = {
+            'medical': {
+                'requires_citation': True,
+                'minimum_sources': 2,
+                'acceptable_sources': [
+                    'peer_reviewed_journals',
+                    'clinical_trials',
+                    'medical_institutions',
+                    'government_health_agencies'
+                ]
+            },
+            
+            'legal': {
+                'requires_citation': True,
+                'minimum_sources': 1,
+                'acceptable_sources': [
+                    'case_law',
+                    'statutes',
+                    'legal_codes',
+                    'bar_associations'
+                ]
+            },
+            
+            'financial': {
+                'requires_citation': True,
+                'minimum_sources': 1,
+                'acceptable_sources': [
+                    'sec_filings',
+                    'financial_statements',
+                    'regulatory_filings',
+                    'verified_financial_data'
+                ]
+            },
+            
+            'scientific': {
+                'requires_citation': True,
+                'minimum_sources': 2,
+                'acceptable_sources': [
+                    'peer_reviewed_papers',
+                    'scientific_institutions',
+                    'research_databases'
+                ]
+            },
+            
+            'news': {
+                'requires_citation': True,
+                'minimum_sources': 2,
+                'acceptable_sources': [
+                    'reputable_news_outlets',
+                    'primary_sources',
+                    'official_statements'
+                ]
+            }
+        }
+    
+    def analyze_output(self, output: str, domain: str, sources: list) -> dict:
+        """Check if output meets citation requirements"""
+        
+        if domain not in self.citation_required_domains:
+            # No specific requirements
+            return {'compliant': True}
+        
+        requirements = self.citation_required_domains[domain]
+        
+        # Extract claims from output
+        claims = self._extract_factual_claims(output)
+        
+        # Check each claim
+        uncited_claims = []
+        poorly_sourced_claims = []
+        
+        for claim in claims:
+            # Find supporting sources
+            supporting = self._find_supporting_sources(claim, sources)
+            
+            if not supporting:
+                uncited_claims.append(claim)
+            elif len(supporting) < requirements['minimum_sources']:
+                poorly_sourced_claims.append({
+                    'claim': claim,
+                    'sources_found': len(supporting),
+                    'sources_required': requirements['minimum_sources']
+                })
+            else:
+                # Check source quality
+                if not self._sources_acceptable(supporting, requirements['acceptable_sources']):
+                    poorly_sourced_claims.append({
+                        'claim': claim,
+                        'issue': 'source_quality'
+                    })
+        
+        if uncited_claims or poorly_sourced_claims:
+            return {
+                'compliant': False,
+                'uncited_claims': uncited_claims,
+                'poorly_sourced': poorly_sourced_claims,
+                'action': 'add_citations_or_qualify'
+            }
+        
+        return {'compliant': True}
+    
+    def _extract_factual_claims(self, text: str) -> list:
+        """Extract factual assertions from text"""
+        
+        claims = []
+        
+        # Use NLP to identify factual statements
+        doc = nlp(text)
+        
+        for sent in doc.sents:
+            # Check if sentence contains factual claim
+            if self._is_factual_claim(sent):
+                claims.append(sent.text)
+        
+        return claims
+    
+    def _is_factual_claim(self, sentence) -> bool:
+        """Determine if sentence is a factual claim"""
+        
+        # Indicators of factual claims
+        factual_indicators = [
+            # Definite assertions
+            lambda s: any(token.dep_ == 'ROOT' and token.pos_ == 'VERB' for token in s),
+            
+            # Statistical claims
+            lambda s: bool(re.search(r'\d+%|\d+ percent', s.text)),
+            
+            # Temporal claims
+            lambda s: any(ent.label_ == 'DATE' for ent in s.ents),
+            
+            # Quantified claims
+            lambda s: any(token.pos_ == 'NUM' for token in s),
+        ]
+        
+        # Anti-indicators (hedging language)
+        hedging_words = ['might', 'could', 'possibly', 'perhaps', 'may', 
+                        'likely', 'probably', 'seems', 'appears']
+        
+        has_hedging = any(word in sentence.text.lower() for word in hedging_words)
+        
+        # Must have factual indicators and not be hedged
+        has_factual = any(indicator(sentence) for indicator in factual_indicators)
+        
+        return has_factual and not has_hedging
