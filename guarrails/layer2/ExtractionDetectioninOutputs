@@ -1,0 +1,58 @@
+class PromptLeakageDetector:
+    def __init__(self, system_prompt: str):
+        self.system_prompt = system_prompt
+        self.prompt_fragments = self._generate_fragments(system_prompt)
+        
+    def _generate_fragments(self, prompt: str, min_length: int = 20) -> set:
+        """Extract distinctive fragments from prompt"""
+        fragments = set()
+        words = prompt.split()
+        
+        # Generate n-grams (sequences of words)
+        for n in range(3, 8):  # 3-7 word sequences
+            for i in range(len(words) - n + 1):
+                fragment = ' '.join(words[i:i+n])
+                if len(fragment) >= min_length:
+                    fragments.add(fragment.lower())
+        
+        return fragments
+    
+    def detect_leakage(self, output: str) -> dict:
+        """Check if output contains prompt fragments"""
+        output_lower = output.lower()
+        leaked_fragments = []
+        
+        for fragment in self.prompt_fragments:
+            if fragment in output_lower:
+                leaked_fragments.append({
+                    'fragment': fragment,
+                    'length': len(fragment),
+                    'position': output_lower.index(fragment)
+                })
+        
+        if leaked_fragments:
+            return {
+                'leaked': True,
+                'severity': 'high' if len(leaked_fragments) > 3 else 'medium',
+                'fragments_count': len(leaked_fragments),
+                'longest_fragment': max(leaked_fragments, key=lambda x: x['length']),
+                'action': 'block_output'
+            }
+        
+        return {'leaked': False}
+    
+    def sanitize_output(self, output: str) -> str:
+        """Remove any leaked fragments from output"""
+        sanitized = output
+        
+        for fragment in sorted(self.prompt_fragments, key=len, reverse=True):
+            if fragment in sanitized.lower():
+                # Replace with generic placeholder
+                sanitized = re.sub(
+                    re.escape(fragment),
+                    '[REDACTED]',
+                    sanitized,
+                    flags=re.IGNORECASE
+                )
+        
+        return sanitized
