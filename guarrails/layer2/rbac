@@ -1,0 +1,104 @@
+class RBACAuthorizationPolicy:
+    def __init__(self):
+        self.roles = {
+            'free_user': {
+                'allowed_tools': [
+                    'web_search',
+                    'calculator',
+                    'weather'
+                ],
+                'denied_tools': [
+                    'code_execution',
+                    'database_query',
+                    'file_system_access',
+                    'payment_processing'
+                ],
+                'tool_limits': {
+                    'web_search': {'per_hour': 10},
+                    'calculator': {'per_hour': 100}
+                }
+            },
+            
+            'premium_user': {
+                'allowed_tools': [
+                    'web_search',
+                    'calculator',
+                    'weather',
+                    'code_execution',
+                    'image_generation',
+                    'document_processing'
+                ],
+                'denied_tools': [
+                    'database_query',
+                    'payment_processing',
+                    'admin_functions'
+                ],
+                'tool_limits': {
+                    'web_search': {'per_hour': 100},
+                    'code_execution': {'per_day': 50},
+                    'image_generation': {'per_day': 100}
+                }
+            },
+            
+            'admin': {
+                'allowed_tools': '*',  # All tools
+                'denied_tools': [],
+                'tool_limits': {}  # No limits
+            }
+        }
+    
+    def authorize_tool_call(
+        self,
+        user_id: str,
+        user_role: str,
+        tool_name: str,
+        arguments: dict
+    ) -> dict:
+        """Check if user can invoke tool"""
+        
+        if user_role not in self.roles:
+            return {
+                'authorized': False,
+                'reason': f'Unknown role: {user_role}'
+            }
+        
+        role_config = self.roles[user_role]
+        
+        # Check denied list first
+        if tool_name in role_config.get('denied_tools', []):
+            return {
+                'authorized': False,
+                'reason': f'Tool {tool_name} explicitly denied for role {user_role}'
+            }
+        
+        # Check allowed list
+        allowed_tools = role_config.get('allowed_tools', [])
+        if allowed_tools != '*' and tool_name not in allowed_tools:
+            return {
+                'authorized': False,
+                'reason': f'Tool {tool_name} not in allowed list for role {user_role}'
+            }
+        
+        # Check usage limits
+        limits = role_config.get('tool_limits', {}).get(tool_name, {})
+        if not self._check_limits(user_id, tool_name, limits):
+            return {
+                'authorized': False,
+                'reason': f'Usage limit exceeded for {tool_name}'
+            }
+        
+        return {
+            'authorized': True,
+            'role': user_role,
+            'tool': tool_name
+        }
+    
+    def _check_limits(self, user_id: str, tool_name: str, limits: dict) -> bool:
+        """Check if user within usage limits"""
+        
+        for period, max_calls in limits.items():
+            current_usage = get_tool_usage(user_id, tool_name, period)
+            if current_usage >= max_calls:
+                return False
+        
+        return True
