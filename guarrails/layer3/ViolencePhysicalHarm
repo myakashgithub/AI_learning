@@ -1,0 +1,45 @@
+violence_categories = {
+    'graphic_violence': {
+        'description': 'Explicit descriptions of gore, injury, death',
+        'examples': [
+            'Detailed description of injuries',
+            'Graphic battle scenes',
+            'Autopsy or medical trauma details'
+        ],
+        'threshold': 0.85,
+        'action': 'block'
+    },
+    
+    'threats': {
+        'description': 'Direct or implied threats of violence',
+        'examples': [
+            'I will hurt you',
+            'You deserve to be attacked',
+            'Threatening language toward individuals/groups'
+        ],
+        'threshold': 0.75,
+        'action': 'block'
+    },
+    
+    'violent_instructions': {
+        'description': 'How-to guides for causing harm',
+        'examples': [
+            'How to build weapons',
+            'How to poison someone',
+            'Attack strategies'
+        ],
+        'threshold': 0.80,
+        'action': 'block'
+    },
+    
+    'mild_violence': {
+        'description': 'Non-graphic references to violence',
+        'examples': [
+            'Historical battle descriptions',
+            'Sports combat terminology',
+            'Action movie plot summaries'
+        ],
+        'threshold': 0.60,
+        'action': 'warn'
+    }
+}
