@@ -1,0 +1,50 @@
+def is_violence_contextually_acceptable(content: str, context: dict) -> bool:
+    """Determine if violent content is acceptable given context"""
+    
+    acceptable_contexts = {
+        'educational': [
+            'history course discussing warfare',
+            'medical training materials',
+            'criminal justice education',
+            'self-defense instruction'
+        ],
+        
+        'creative': [
+            'fiction writing',
+            'screenplay development',
+            'video game narrative',
+            'literary analysis'
+        ],
+        
+        'professional': [
+            'forensic science',
+            'emergency response training',
+            'security planning',
+            'conflict resolution'
+        ],
+        
+        'news_analysis': [
+            'current events discussion',
+            'political analysis',
+            'investigative journalism'
+        ]
+    }
+    
+    # Check if context indicates legitimate use
+    user_role = context.get('user_role')
+    conversation_topic = context.get('topic')
+    explicit_framing = context.get('framing')
+    
+    if user_role in ['educator', 'researcher', 'journalist', 'healthcare']:
+        if has_educational_framing(content):
+            return True
+    
+    if conversation_topic in ['creative_writing', 'fiction', 'screenplay']:
+        if has_narrative_framing(content):
+            return True
+    
+    if explicit_framing == 'historical_analysis':
+        if has_analytical_distance(content):
+            return True
+    
+    return False
