@@ -1,0 +1,13 @@
+def handle_critical_toxicity(original_output: str, toxicity_result: dict) -> str:
+    """Block and replace with safe message"""
+    
+    # Log the incident
+    log_toxicity_incident({
+        'severity': 'critical',
+        'scores': toxicity_result['scores'],
+        'output_hash': hashlib.sha256(original_output.encode()).hexdigest(),
+        'timestamp': datetime.utcnow()
+    })
+    
+    # Return safe fallback
+    return "I cannot provide that response as it violates content safety policies. I'm here to have respectful, helpful conversations. How else can I assist you?"
