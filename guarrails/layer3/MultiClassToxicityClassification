@@ -1,0 +1,65 @@
+class ToxicityClassifier:
+    def __init__(self):
+        self.models = {
+            'perspective_api': PerspectiveAPIClient(),
+            'detoxify': DetoxifyModel(),
+            'custom_bert': load_model('toxic_classifier_v2.pt')
+        }
+        
+        self.dimensions = [
+            'toxicity',
+            'severe_toxicity',
+            'identity_attack',
+            'insult',
+            'profanity',
+            'threat',
+            'sexual_explicit',
+            'flirtation'
+        ]
+    
+    def classify(self, text: str) -> dict:
+        """Run ensemble classification"""
+        
+        results = {}
+        
+        # Run all models
+        for model_name, model in self.models.items():
+            try:
+                scores = model.predict(text)
+                results[model_name] = scores
+            except Exception as e:
+                log_error(f"Model {model_name} failed: {e}")
+                continue
+        
+        # Ensemble: take maximum score across models for each dimension
+        ensemble_scores = {}
+        for dimension in self.dimensions:
+            scores = [
+                results[model].get(dimension, 0.0)
+                for model in results
+            ]
+            ensemble_scores[dimension] = max(scores) if scores else 0.0
+        
+        # Determine overall toxicity
+        max_score = max(ensemble_scores.values())
+        
+        return {
+            'scores': ensemble_scores,
+            'max_score': max_score,
+            'toxic': max_score > 0.70,
+            'severity': self._get_severity(max_score),
+            'models_used': list(results.keys())
+        }
+    
+    def _get_severity(self, score: float) -> str:
+        """Map score to severity level"""
+        if score >= 0.90:
+            return 'critical'
+        elif score >= 0.75:
+            return 'high'
+        elif score >= 0.60:
+            return 'medium'
+        elif score >= 0.40:
+            return 'low'
+        else:
+            return 'none'
