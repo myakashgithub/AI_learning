@@ -1,0 +1,85 @@
+class MemorizationDetector:
+    def __init__(self):
+        self.min_suspicious_length = 50  # Characters
+        self.perplexity_threshold = 2.0  # Low perplexity = memorized
+        
+    def detect_memorization(self, output: str, model_name: str) -> dict:
+        """Detect if output is memorized training data"""
+        
+        suspicious_segments = []
+        
+        # Split output into segments
+        segments = self._segment_text(output)
+        
+        for segment in segments:
+            if len(segment) < self.min_suspicious_length:
+                continue
+            
+            # Calculate perplexity
+            perplexity = self._calculate_perplexity(segment, model_name)
+            
+            if perplexity < self.perplexity_threshold:
+                # Low perplexity = likely memorized
+                suspicious_segments.append({
+                    'text': segment,
+                    'perplexity': perplexity,
+                    'likelihood': 'high' if perplexity < 1.5 else 'medium'
+                })
+        
+        # Additional checks
+        for segment in suspicious_segments:
+            # Check for exact matches in known datasets (if available)
+            if self._check_dataset_match(segment['text']):
+                segment['confirmed_memorization'] = True
+            
+            # Check for common verbatim patterns
+            if self._has_memorization_patterns(segment['text']):
+                segment['patterns_detected'] = True
+        
+        return {
+            'memorization_detected': len(suspicious_segments) > 0,
+            'segments': suspicious_segments,
+            'action': 'block' if any(s.get('confirmed_memorization') for s in suspicious_segments) else 'review'
+        }
+    
+    def _calculate_perplexity(self, text: str, model_name: str) -> float:
+        """Calculate perplexity score for text"""
+        
+        # Use a separate perplexity model
+        perplexity_model = load_perplexity_model(model_name)
+        
+        tokenized = perplexity_model.tokenize(text)
+        log_likelihood = perplexity_model.score(tokenized)
+        
+        perplexity = math.exp(-log_likelihood / len(tokenized))
+        
+        return perplexity
+    
+    def _has_memorization_patterns(self, text: str) -> bool:
+        """Check for common patterns in memorized content"""
+        
+        patterns = [
+            # Email signatures
+            r'Sent from my iPhone',
+            r'Best regards,\s+[\w\s]+',
+            
+            # Copyright notices
+            r'Copyright \(c\) \d{4}',
+            r'All rights reserved',
+            
+            # Code comments with names
+            r'// Written by [\w\s]+',
+            r'# Author: [\w\s]+',
+            
+            # Formal document headers
+            r'CONFIDENTIAL.*?ATTORNEY-CLIENT',
+            
+            # Email threads
+            r'From:.*?Sent:.*?To:.*?Subject:',
+        ]
+        
+        for pattern in patterns:
+            if re.search(pattern, text, re.IGNORECASE | re.DOTALL):
+                return True
+        
+        return False
