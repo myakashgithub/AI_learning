@@ -1,0 +1,122 @@
+class OutputPIIDetector:
+    def __init__(self):
+        self.pii_patterns = {
+            'ssn': {
+                'pattern': r'\b\d{3}-\d{2}-\d{4}\b',
+                'severity': 'critical',
+                'action': 'redact_and_alert'
+            },
+            
+            'credit_card': {
+                'pattern': r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b',
+                'validation': self._luhn_check,
+                'severity': 'critical',
+                'action': 'redact_and_alert'
+            },
+            
+            'email': {
+                'pattern': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+                'severity': 'high',
+                'action': 'redact',
+                'exceptions': ['generic_emails']  # info@, support@, etc.
+            },
+            
+            'phone': {
+                'pattern': r'\b(\+\d{1,2}\s?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b',
+                'severity': 'high',
+                'action': 'redact',
+                'exceptions': ['toll_free']  # 1-800 numbers
+            },
+            
+            'ip_address': {
+                'pattern': r'\b(?:\d{1,3}\.){3}\d{1,3}\b',
+                'severity': 'medium',
+                'action': 'review',
+                'exceptions': ['private_ranges']  # 192.168.x.x, 10.x.x.x
+            },
+            
+            'address': {
+                'method': 'ner_detection',  # Use NER model
+                'severity': 'high',
+                'action': 'redact'
+            }
+        }
+    
+    def scan_output(self, text: str, context: dict) -> dict:
+        """Scan generated output for PII"""
+        
+        findings = []
+        
+        # Pattern-based detection
+        for pii_type, config in self.pii_patterns.items():
+            if 'pattern' in config:
+                matches = re.finditer(config['pattern'], text)
+                
+                for match in matches:
+                    # Check exceptions
+                    if self._is_exception(match.group(), pii_type, config):
+                        continue
+                    
+                    # Additional validation if needed
+                    if 'validation' in config:
+                        if not config['validation'](match.group()):
+                            continue
+                    
+                    findings.append({
+                        'type': pii_type,
+                        'value': match.group(),
+                        'position': match.span(),
+                        'severity': config['severity'],
+                        'action': config['action']
+                    })
+            
+            elif config.get('method') == 'ner_detection':
+                # Use NER for complex patterns like addresses
+                ner_results = self._ner_detect(text, pii_type)
+                findings.extend(ner_results)
+        
+        return {
+            'pii_detected': len(findings) > 0,
+            'findings': findings,
+            'risk_level': self._calculate_risk(findings)
+        }
+    
+    def _is_exception(self, value: str, pii_type: str, config: dict) -> bool:
+        """Check if detected value is an exception"""
+        
+        exceptions = config.get('exceptions', [])
+        
+        if pii_type == 'email' and 'generic_emails' in exceptions:
+            generic_prefixes = ['info@', 'support@', 'contact@', 'help@', 
+                              'sales@', 'admin@', 'noreply@']
+            if any(value.lower().startswith(prefix) for prefix in generic_prefixes):
+                return True
+        
+        if pii_type == 'phone' and 'toll_free' in exceptions:
+            if value.startswith('1-800') or value.startswith('1-888'):
+                return True
+        
+        if pii_type == 'ip_address' and 'private_ranges' in exceptions:
+            if self._is_private_ip(value):
+                return True
+        
+        return False
+    
+    def redact_pii(self, text: str, findings: list) -> str:
+        """Redact PII from output"""
+        
+        # Sort findings by position (reverse order to maintain indices)
+        sorted_findings = sorted(findings, key=lambda x: x['position'][0], reverse=True)
+        
+        redacted_text = text
+        
+        for finding in sorted_findings:
+            start, end = finding['position']
+            pii_type = finding['type']
+            
+            # Create appropriate placeholder
+            placeholder = f"[REDACTED_{pii_type.upper()}]"
+            
+            redacted_text = redacted_text[:start] + placeholder + redacted_text[end:]
+        
+        return redacted_text
