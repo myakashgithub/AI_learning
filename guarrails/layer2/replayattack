@@ -1,0 +1,44 @@
+class ReplayAttackPrevention:
+    def __init__(self, max_age_seconds: int = 300):  # 5 minutes
+        self.max_age = max_age_seconds
+        self.used_nonces = {}  # {nonce: expiry_time}
+        
+    def generate_nonce(self) -> str:
+        """Generate unique nonce for conversation state"""
+        import secrets
+        return secrets.token_urlsafe(32)
+    
+    def validate_nonce(self, nonce: str, timestamp: datetime) -> bool:
+        """Check if nonce is valid and not replayed"""
+        
+        # Clean up expired nonces
+        current_time = datetime.utcnow()
+        self.used_nonces = {
+            n: exp for n, exp in self.used_nonces.items()
+            if exp > current_time
+        }
+        
+        # Check if nonce already used
+        if nonce in self.used_nonces:
+            return False  # Replay detected
+        
+        # Check if timestamp is too old
+        age = (current_time - timestamp).total_seconds()
+        if age > self.max_age:
+            return False  # State too old
+        
+        # Mark nonce as used
+        expiry = current_time + timedelta(seconds=self.max_age * 2)
+        self.used_nonces[nonce] = expiry
+        
+        return True
+    
+    def create_timestamped_state(self, conversation_id: str, messages: list) -> dict:
+        """Create state with anti-replay protections"""
+        
+        return {
+            'conversation_id': conversation_id,
+            'messages': messages,
+            'nonce': self.generate_nonce(),
+            'timestamp': datetime.utcnow().isoformat(),
+            'expires_at': (datetime.utcnow() + timedelta(seconds=self.max_age)).isoformat()
