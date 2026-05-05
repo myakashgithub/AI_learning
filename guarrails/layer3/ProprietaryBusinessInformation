@@ -1,0 +1,106 @@
+class ProprietaryInfoDetector:
+    def __init__(self, company_config: dict):
+        self.company_patterns = company_config.get('proprietary_patterns', {})
+        self.sensitive_terms = company_config.get('sensitive_terms', [])
+        
+    def detect_proprietary_info(self, output: str) -> dict:
+        """Detect proprietary business information"""
+        
+        findings = []
+        
+        # Check for internal URLs
+        internal_urls = self._detect_internal_urls(output)
+        findings.extend(internal_urls)
+        
+        # Check for database schema info
+        schema_info = self._detect_schema_info(output)
+        findings.extend(schema_info)
+        
+        # Check for sensitive business terms
+        sensitive_mentions = self._detect_sensitive_terms(output)
+        findings.extend(sensitive_mentions)
+        
+        # Check for financial data
+        financial_data = self._detect_financial_data(output)
+        findings.extend(financial_data)
+        
+        if findings:
+            return {
+                'proprietary_detected': True,
+                'findings': findings,
+                'action': 'redact_and_review'
+            }
+        
+        return {'proprietary_detected': False}
+    
+    def _detect_internal_urls(self, text: str) -> list:
+        """Detect internal URLs and endpoints"""
+        
+        findings = []
+        
+        # Internal domain patterns
+        internal_patterns = [
+            r'https?://.*?\.internal\.',
+            r'https?://.*?\.corp\.',
+            r'https?://localhost:\d+',
+            r'https?://192\.168\.\d+\.\d+',
+            r'https?://10\.\d+\.\d+\.\d+',
+        ]
+        
+        for pattern in internal_patterns:
+            matches = re.finditer(pattern, text)
+            for match in matches:
+                findings.append({
+                    'type': 'internal_url',
+                    'value': match.group(0),
+                    'severity': 'high'
+                })
+        
+        return findings
+    
+    def _detect_schema_info(self, text: str) -> list:
+        """Detect database schema information"""
+        
+        findings = []
+        
+        # SQL table/column patterns
+        sql_patterns = [
+            r'CREATE TABLE\s+(\w+)',
+            r'ALTER TABLE\s+(\w+)',
+            r'SELECT.*FROM\s+(\w+)',
+            r'INSERT INTO\s+(\w+)',
+        ]
+        
+        for pattern in sql_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                findings.append({
+                    'type': 'database_schema',
+                    'value': match.group(0),
+                    'severity': 'medium'
+                })
+        
+        return findings
+    
+    def _detect_financial_data(self, text: str) -> list:
+        """Detect specific financial figures that might be confidential"""
+        
+        findings = []
+        
+        # Revenue figures
+        revenue_pattern = r'\$\d+(?:,\d{3})*(?:\.\d{2})?\s*(?:million|billion|M|B)'
+        matches = re.finditer(revenue_pattern, text, re.IGNORECASE)
+        
+        for match in matches:
+            # Check if this is a large figure (potentially confidential)
+            amount_str = match.group(0).replace('$', '').replace(',', '')
+            
+            # Flag large specific figures
+            findings.append({
+                'type': 'financial_figure',
+                'value': match.group(0),
+                'severity': 'medium',
+                'recommendation': 'Verify if public information'
+            })
+        
+        return findings
