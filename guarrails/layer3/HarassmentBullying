@@ -1,0 +1,80 @@
+class HarassmentDetector:
+    def detect_harassment(self, text: str, context: dict) -> dict:
+        """Detect various forms of harassment"""
+        
+        patterns = {
+            'targeted_attacks': {
+                'description': 'Personal attacks on individuals',
+                'indicators': [
+                    'name-calling directed at specific person',
+                    'threats toward individual',
+                    'doxing (sharing personal info)',
+                    'repeated negative targeting'
+                ],
+                'severity': 'high'
+            },
+            
+            'cyberbullying': {
+                'description': 'Persistent negative behavior',
+                'indicators': [
+                    'mocking or ridiculing',
+                    'spreading rumors',
+                    'exclusion tactics',
+                    'impersonation'
+                ],
+                'severity': 'high'
+            },
+            
+            'pile_on': {
+                'description': 'Coordinated harassment',
+                'indicators': [
+                    'encouraging others to attack',
+                    'brigading language',
+                    'coordinated negative campaigns'
+                ],
+                'severity': 'high'
+            },
+            
+            'professional_harassment': {
+                'description': 'Undermining professional reputation',
+                'indicators': [
+                    'false accusations of misconduct',
+                    'defamatory statements',
+                    'professional sabotage language'
+                ],
+                'severity': 'medium'
+            }
+        }
+        
+        # Check conversation history for patterns
+        history = context.get('conversation_history', [])
+        
+        # Single instance vs pattern
+        is_pattern = self._detect_harassment_pattern(text, history)
+        
+        detected = []
+        for pattern_name, pattern_info in patterns.items():
+            if self._matches_pattern(text, pattern_info['indicators']):
+                detected.append({
+                    'type': pattern_name,
+                    'severity': pattern_info['severity'],
+                    'is_pattern': is_pattern
+                })
+        
+        if detected:
+            # Escalate if pattern detected
+            if is_pattern:
+                severity = 'critical'
+                action = 'block_and_alert_moderators'
+            else:
+                severity = max([d['severity'] for d in detected])
+                action = 'block'
+            
+            return {
+                'harassment_detected': True,
+                'patterns': detected,
+                'severity': severity,
+                'action': action
+            }
+        
+        return {'harassment_detected': False}
