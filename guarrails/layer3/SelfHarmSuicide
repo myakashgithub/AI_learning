@@ -1,0 +1,108 @@
+class SelfHarmFilter:
+    def __init__(self):
+        self.crisis_resources = {
+            'US': {
+                'suicide_prevention': '988',
+                'crisis_text': 'Text HOME to 741741',
+                'trevor_project': '1-866-488-7386'  # LGBTQ+ youth
+            },
+            'UK': {
+                'samaritans': '116 123',
+                'crisis_text': 'Text SHOUT to 85258'
+            },
+            'International': {
+                'suicide_prevention': 'https://findahelpline.com'
+            }
+        }
+    
+    def detect_self_harm_content(self, text: str, context: dict) -> dict:
+        """Detect and respond to self-harm content"""
+        
+        categories = {
+            'active_ideation': {
+                'indicators': [
+                    'explicit statements of suicidal intent',
+                    'specific suicide plans',
+                    'farewell messages',
+                    'expressions of hopelessness with intent'
+                ],
+                'urgency': 'critical',
+                'response': 'crisis_intervention'
+            },
+            
+            'self_harm_instructions': {
+                'indicators': [
+                    'methods of self-harm',
+                    'suicide how-to content',
+                    'encouragement of self-harm'
+                ],
+                'urgency': 'high',
+                'response': 'block_and_provide_resources'
+            },
+            
+            'pro_ana_pro_mia': {
+                'indicators': [
+                    'pro-eating disorder content',
+                    'thinspo/fitspo',
+                    'tips for hiding eating disorders',
+                    'weight loss challenges'
+                ],
+                'urgency': 'high',
+                'response': 'block_and_redirect'
+            },
+            
+            'passive_ideation': {
+                'indicators': [
+                    'expressions of wanting to disappear',
+                    'feeling hopeless',
+                    'burden to others',
+                    'no reason to live'
+                ],
+                'urgency': 'medium',
+                'response': 'supportive_resources'
+            }
+        }
+        
+        detected_category = self._classify_self_harm(text, categories)
+        
+        if not detected_category:
+            return {'self_harm_detected': False}
+        
+        # Never provide requested harmful information
+        # Always provide supportive response with resources
+        
+        user_location = context.get('location', 'US')
+        resources = self.crisis_resources.get(user_location, self.crisis_resources['US'])
+        
+        if detected_category['urgency'] == 'critical':
+            # Active suicidal ideation
+            response = self._generate_crisis_response(resources)
+            
+            # Alert human moderators
+            alert_crisis_team({
+                'user_id': context.get('user_id'),
+                'severity': 'critical',
+                'content_hash': hashlib.sha256(text.encode()).hexdigest(),
+                'timestamp': datetime.utcnow()
+            })
+        
+        elif detected_category['urgency'] == 'high':
+            # Self-harm instructions or pro-ED content
+            response = self._generate_resource_response(resources)
+        
+        else:
+            # Passive ideation - supportive response
+            response = self._generate_supportive_response(resources)
+        
+        return {
+            'self_harm_detected': True,
+            'category': detected_category['name'],
+            'urgency': detected_category['urgency'],
+            'response': response,
+            'action': 'replace_output_with_resources'
+        }
+    
+    def _generate_crisis_response(self, resources: dict) -> str:
+        """Generate immediate crisis intervention response"""
+        
+        return f"""I'm concerned about what you've shared. Please reach out to someone who can help right now:
