@@ -1,0 +1,27 @@
+def rewrite_toxic_content(original_output: str, toxicity_result: dict) -> str:
+    """Attempt to rewrite preserving intent but removing toxicity"""
+    
+    # Extract core intent
+    intent = extract_intent(original_output)
+    
+    # Generate alternative response
+    rewrite_prompt = f"""
+    Original response contained potentially harmful content.
+    Core intent: {intent}
+    
+    Generate a safe, respectful alternative that addresses the intent without:
+    - Toxic language
+    - Personal attacks  
+    - Offensive content
+    - Harmful stereotypes
+    """
+    
+    rewritten = generate_safe_alternative(rewrite_prompt)
+    
+    # Verify rewrite is safe
+    rewrite_check = classify_toxicity(rewritten)
+    if rewrite_check['toxic']:
+        # Rewrite still toxic, use generic fallback
+        return handle_critical_toxicity(original_output, toxicity_result)
+    
+    return rewritten
