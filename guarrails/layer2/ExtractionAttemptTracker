@@ -1,0 +1,28 @@
+class ExtractionAttemptTracker:
+    def __init__(self):
+        self.attempt_patterns = [
+            r'what.*instructions',
+            r'repeat.*prompt',
+            r'show.*system',
+            r'tell me.*guidelines',
+            r'what were you told',
+            r'encode.*instructions',
+            r'translate.*prompt'
+        ]
+        self.user_attempts = {}  # {user_id: count}
+        
+    def detect_extraction_attempt(self, user_id: str, message: str) -> bool:
+        message_lower = message.lower()
+        
+        for pattern in self.attempt_patterns:
+            if re.search(pattern, message_lower):
+                # Increment attempt counter
+                self.user_attempts[user_id] = self.user_attempts.get(user_id, 0) + 1
+                
+                if self.user_attempts[user_id] > 3:
+                    # Escalate to security team
+                    alert_security_team(user_id, "repeated_extraction_attempts")
+                    
+                return True
+                
+        return False
