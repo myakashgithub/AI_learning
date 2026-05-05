@@ -1,0 +1,39 @@
+class ConversationVersionControl:
+    def __init__(self):
+        self.versions = {}  # {conversation_id: [states]}
+        
+    def checkpoint(self, conversation_id: str, messages: list, metadata: dict):
+        """Create checkpoint of conversation state"""
+        
+        if conversation_id not in self.versions:
+            self.versions[conversation_id] = []
+        
+        checkpoint = {
+            'version': len(self.versions[conversation_id]) + 1,
+            'messages': copy.deepcopy(messages),
+            'metadata': metadata,
+            'timestamp': datetime.utcnow(),
+            'hash': self._hash_state(messages)
+        }
+        
+        self.versions[conversation_id].append(checkpoint)
+        
+    def validate_progression(self, conversation_id: str, current_messages: list) -> bool:
+        """Ensure conversation evolved logically from last checkpoint"""
+        
+        if conversation_id not in self.versions or not self.versions[conversation_id]:
+            return True  # No previous state to compare
+        
+        last_checkpoint = self.versions[conversation_id][-1]
+        last_messages = last_checkpoint['messages']
+        
+        # Current messages should include all previous messages (append-only)
+        if len(current_messages) < len(last_messages):
+            return False  # Messages were deleted
+        
+        # Check that previous messages weren't modified
+        for i, last_msg in enumerate(last_messages):
+            if current_messages[i] != last_msg:
+                return False  # Historical message was modified
+        
+        return True
