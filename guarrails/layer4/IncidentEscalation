@@ -1,0 +1,322 @@
+# File: guardrails/layer4/incident_escalation.py
+
+from enum import Enum
+from typing import Dict, List
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+class IncidentSeverity(Enum):
+    P0_CRITICAL = "P0"  # Immediate response required
+    P1_HIGH = "P1"      # Response within 1 hour
+    P2_MEDIUM = "P2"    # Response within 4 hours
+    P3_LOW = "P3"       # Response within 24 hours
+    P4_INFO = "P4"      # No response required
+
+class IncidentEscalationManager:
+    """
+    Manage incident detection, classification, and escalation.
+    
+    Escalation levels:
+    - P0: Critical (active attack, data breach, system compromise)
+    - P1: High (repeated attacks, policy violations, anomalies)
+    - P2: Medium (suspicious activity, configuration issues)
+    - P3: Low (potential issues, warnings)
+    - P4: Info (normal events, audit logs)
+    """
+    
+    def __init__(self, alert_backend, oncall_rotation):
+        self.alert_backend = alert_backend
+        self.oncall = oncall_rotation
+        
+        # Escalation rules
+        self.rules = self._define_escalation_rules()
+        
+        # De-duplication window (seconds)
+        self.dedup_window = 300  # 5 minutes
+        self.recent_incidents = {}
+    
+    def _define_escalation_rules(self) -> Dict:
+        """Define incident escalation rules"""
+        
+        return {
+            # Critical (P0) - Immediate escalation
+            'active_attack': {
+                'severity': IncidentSeverity.P0_CRITICAL,
+                'conditions': [
+                    lambda e: e.get('attack_in_progress', False),
+                    lambda e: e.get('data_breach_detected', False),
+                    lambda e: e.get('unauthorized_admin_access', False)
+                ],
+                'escalation': ['page_oncall', 'email_security_team', 'slack_critical']
+            },
+            
+            # High (P1) - Escalate within 1 hour
+            'repeated_violations': {
+                'severity': IncidentSeverity.P1_HIGH,
+                'conditions': [
+                    lambda e: e.get('violation_count_1h', 0) > 10,
+                    lambda e: e.get('multiple_users_affected', False),
+                    lambda e: e.get('critical_system_error', False)
+                ],
+                'escalation': ['email_oncall', 'slack_alerts']
+            },
+            
+            # Medium (P2) - Escalate within 4 hours
+            'suspicious_activity': {
+                'severity': IncidentSeverity.P2_MEDIUM,
+                'conditions': [
+                    lambda e: e.get('anomaly_detected', False),
+                    lambda e: e.get('unusual_access_pattern', False),
+                    lambda e: e.get('policy_warning', False)
+                ],
+                'escalation': ['email_security_team', 'slack_warnings']
+            },
+            
+            # Low (P3) - Review within 24 hours
+            'potential_issue': {
+                'severity': IncidentSeverity.P3_LOW,
+                'conditions': [
+                    lambda e: e.get('drift_detected', False),
+                    lambda e: e.get('performance_degradation', False)
+                ],
+                'escalation': ['email_summary']
+            }
+        }
+    
+    def process_event(self, event: Dict) -> Dict:
+        """
+        Process event and determine if escalation needed.
+        
+        Args:
+            event: Event details {
+                'type': str,
+                'user_id': str,
+                'details': dict,
+                'timestamp': datetime,
+                ...
+            }
+            
+        Returns:
+            {
+                'escalated': bool,
+                'incident_id': str,
+                'severity': str,
+                'actions_taken': List[str]
+            }
+        """
+        
+        # Classify incident
+        classification = self._classify_incident(event)
+        
+        if not classification:
+            # No escalation needed
+            return {
+                'escalated': False,
+                'severity': IncidentSeverity.P4_INFO.value
+            }
+        
+        # Check for de-duplication
+        if self._is_duplicate(event, classification):
+            logger.debug(f"Duplicate incident suppressed: {classification['type']}")
+            return {
+                'escalated': False,
+                'severity': classification['severity'].value,
+                'reason': 'duplicate_suppressed'
+            }
+        
+        # Create incident
+        incident = self._create_incident(event, classification)
+        
+        # Execute escalation actions
+        actions_taken = self._execute_escalation(incident, classification)
+        
+        # Record in recent incidents (for de-duplication)
+        self._record_recent_incident(incident, classification)
+        
+        return {
+            'escalated': True,
+            'incident_id': incident['id'],
+            'severity': classification['severity'].value,
+            'actions_taken': actions_taken
+        }
+    
+    def _classify_incident(self, event: Dict) -> Dict:
+        """Classify incident based on event characteristics"""
+        
+        for rule_name, rule in self.rules.items():
+            # Check if any condition matches
+            if any(condition(event) for condition in rule['conditions']):
+                return {
+                    'type': rule_name,
+                    'severity': rule['severity'],
+                    'escalation_actions': rule['escalation']
+                }
+        
+        return None
+    
+    def _is_duplicate(self, event: Dict, classification: Dict) -> bool:
+        """Check if similar incident recently escalated"""
+        
+        key = f"{event['user_id']}:{classification['type']}"
+        
+        if key in self.recent_incidents:
+            last_incident_time = self.recent_incidents[key]
+            time_diff = (datetime.utcnow() - last_incident_time).total_seconds()
+            
+            if time_diff < self.dedup_window:
+                return True
+        
+        return False
+    
+    def _create_incident(self, event: Dict, classification: Dict) -> Dict:
+        """Create incident record"""
+        
+        import uuid
+        
+        incident = {
+            'id': str(uuid.uuid4()),
+            'type': classification['type'],
+            'severity': classification['severity'].value,
+            'user_id': event.get('user_id'),
+            'event_type': event.get('type'),
+            'details': event.get('details', {}),
+            'timestamp': datetime.utcnow(),
+            'status': 'open'
+        }
+        
+        # Store incident
+        # self.storage.save_incident(incident)
+        
+        logger.info(f"Created incident {incident['id']} - {classification['type']} ({classification['severity'].value})")
+        
+        return incident
+    
+    def _execute_escalation(self, incident: Dict, classification: Dict) -> List[str]:
+        """Execute escalation actions"""
+        
+        actions_taken = []
+        
+        for action in classification['escalation_actions']:
+            try:
+                if action == 'page_oncall':
+                    self._page_oncall(incident)
+                    actions_taken.append('paged_oncall')
+                
+                elif action == 'email_oncall':
+                    self._email_oncall(incident)
+                    actions_taken.append('emailed_oncall')
+                
+                elif action == 'email_security_team':
+                    self._email_security_team(incident)
+                    actions_taken.append('emailed_security_team')
+                
+                elif action == 'slack_critical':
+                    self._slack_alert(incident, channel='#security-critical')
+                    actions_taken.append('slack_critical')
+                
+                elif action == 'slack_alerts':
+                    self._slack_alert(incident, channel='#security-alerts')
+                    actions_taken.append('slack_alerts')
+                
+                elif action == 'slack_warnings':
+                    self._slack_alert(incident, channel='#security-warnings')
+                    actions_taken.append('slack_warnings')
+                
+                elif action == 'email_summary':
+                    # Queue for daily summary email
+                    actions_taken.append('queued_for_summary')
+            
+            except Exception as e:
+                logger.error(f"Escalation action failed: {action} - {e}")
+        
+        return actions_taken
+    
+    def _record_recent_incident(self, incident: Dict, classification: Dict):
+        """Record incident for de-duplication"""
+        
+        key = f"{incident['user_id']}:{classification['type']}"
+        self.recent_incidents[key] = incident['timestamp']
+    
+    def _page_oncall(self, incident: Dict):
+        """Page on-call engineer"""
+        oncall_engineer = self.oncall.get_current_oncall()
+        self.alert_backend.send_page(
+            oncall_engineer,
+            f"P0 INCIDENT: {incident['type']}",
+            incident
+        )
+    
+    def _email_oncall(self, incident: Dict):
+        """Email on-call engineer"""
+        oncall_engineer = self.oncall.get_current_oncall()
+        self.alert_backend.send_email(
+            oncall_engineer['email'],
+            f"Security Incident: {incident['type']}",
+            self._format_incident_email(incident)
+        )
+    
+    def _email_security_team(self, incident: Dict):
+        """Email security team"""
+        self.alert_backend.send_email(
+            'security-team@company.com',
+            f"Security Incident: {incident['type']}",
+            self._format_incident_email(incident)
+        )
+    
+    def _slack_alert(self, incident: Dict, channel: str):
+        """Send Slack alert"""
+        self.alert_backend.send_slack(
+            channel,
+            self._format_slack_message(incident)
+        )
+    
+    @staticmethod
+    def _format_incident_email(incident: Dict) -> str:
+        """Format incident as email"""
+        
+        return f"""
+Security Incident Alert
+
+Incident ID: {incident['id']}
+Severity: {incident['severity']}
+Type: {incident['type']}
+User: {incident.get('user_id', 'N/A')}
+Timestamp: {incident['timestamp']}
+
+Details:
+{json.dumps(incident['details'], indent=2)}
+
+Actions Required:
+1. Review incident details
+2. Investigate root cause
+3. Take appropriate remediation action
+4. Update incident status
+
+Dashboard: https://security.company.com/incidents/{incident['id']}
+"""
+    
+    @staticmethod
+    def _format_slack_message(incident: Dict) -> Dict:
+        """Format incident as Slack message"""
+        
+        color = {
+            'P0': '#FF0000',  # Red
+            'P1': '#FF8C00',  # Orange
+            'P2': '#FFD700',  # Yellow
+            'P3': '#00CED1',  # Blue
+        }.get(incident['severity'], '#808080')
+        
+        return {
+            'attachments': [{
+                'color': color,
+                'title': f"{incident['severity']} Security Incident",
+                'text': f"Type: {incident['type']}\nUser: {incident.get('user_id', 'N/A')}",
+                'fields': [
+                    {'title': 'Incident ID', 'value': incident['id'], 'short': True},
+                    {'title': 'Timestamp', 'value': str(incident['timestamp']), 'short': True}
+                ],
+                'footer': 'Guardrail Security System'
+            }]
+        }
