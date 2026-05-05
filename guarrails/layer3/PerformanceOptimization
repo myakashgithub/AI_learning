@@ -1,0 +1,30 @@
+class ToxicityCache:
+    def __init__(self, redis_client):
+        self.cache = redis_client
+        self.ttl = 3600  # 1 hour
+    
+    def get_cached_result(self, text: str) -> dict:
+        """Check if we've already classified this text"""
+        
+        # Generate cache key
+        text_hash = hashlib.sha256(text.encode()).hexdigest()
+        cache_key = f"toxicity:{text_hash}"
+        
+        # Check cache
+        cached = self.cache.get(cache_key)
+        if cached:
+            return json.loads(cached)
+        
+        return None
+    
+    def cache_result(self, text: str, result: dict):
+        """Cache classification result"""
+        
+        text_hash = hashlib.sha256(text.encode()).hexdigest()
+        cache_key = f"toxicity:{text_hash}"
+        
+        self.cache.setex(
+            cache_key,
+            self.ttl,
+            json.dumps(result)
+        )
