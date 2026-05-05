@@ -1,0 +1,121 @@
+# File: guardrails/layer4/drift_monitoring.py
+
+import numpy as np
+from typing import Dict, List
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+class ModelDriftMonitor:
+    """
+    Monitor AI model for drift and degradation.
+    
+    Tracks:
+    - Output quality metrics
+    - Prediction confidence distributions
+    - Error rates
+    - Latency changes
+    - Behavioral shifts
+    """
+    
+    def __init__(self, storage):
+        self.storage = storage
+        
+        # Baseline metrics (set during initial deployment)
+        self.baseline = None
+        
+        # Drift thresholds
+        self.thresholds = {
+            'error_rate_increase': 0.1,  # 10% increase
+            'latency_increase': 0.2,     # 20% increase
+            'confidence_shift': 0.15,    # 15% shift in avg confidence
+            'output_diversity_change': 0.2
+        }
+    
+    def check_drift(self, current_metrics: Dict) -> Dict:
+        """
+        Check if model has drifted from baseline.
+        
+        Args:
+            current_metrics: {
+                'error_rate': float,
+                'avg_latency_ms': float,
+                'avg_confidence': float,
+                'output_diversity': float,
+                'harmful_content_rate': float
+            }
+            
+        Returns:
+            {
+                'drift_detected': bool,
+                'drifts': List[dict],
+                'severity': str
+            }
+        """
+        
+        if not self.baseline:
+            # Establish baseline
+            self.baseline = current_metrics
+            logger.info("Baseline metrics established")
+            return {
+                'drift_detected': False,
+                'drifts': [],
+                'severity': 'none'
+            }
+        
+        drifts = []
+        
+        # Check each metric
+        for metric, current_value in current_metrics.items():
+            if metric not in self.baseline:
+                continue
+            
+            baseline_value = self.baseline[metric]
+            threshold = self.thresholds.get(f"{metric}_change", 0.15)
+            
+            # Calculate relative change
+            if baseline_value > 0:
+                relative_change = abs(current_value - baseline_value) / baseline_value
+            else:
+                relative_change = 0.0
+            
+            if relative_change > threshold:
+                drifts.append({
+                    'metric': metric,
+                    'baseline_value': baseline_value,
+                    'current_value': current_value,
+                    'relative_change': relative_change,
+                    'threshold': threshold,
+                    'severity': self._calculate_drift_severity(relative_change, threshold)
+                })
+        
+        # Determine overall severity
+        if drifts:
+            max_severity = max(d['severity'] for d in drifts)
+            severity_order = ['low', 'medium', 'high', 'critical']
+            overall_severity = max(
+                (d['severity'] for d in drifts),
+                key=lambda s: severity_order.index(s)
+            )
+        else:
+            overall_severity = 'none'
+        
+        return {
+            'drift_detected': len(drifts) > 0,
+            'drifts': drifts,
+            'severity': overall_severity
+        }
+    
+    @staticmethod
+    def _calculate_drift_severity(relative_change: float, threshold: float) -> str:
+        """Calculate drift severity"""
+        
+        if relative_change > threshold * 3:
+            return 'critical'
+        elif relative_change > threshold * 2:
+            return 'high'
+        elif relative_change > threshold * 1.5:
+            return 'medium'
+        else:
+            return 'low'
