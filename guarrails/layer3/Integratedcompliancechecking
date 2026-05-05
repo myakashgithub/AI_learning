@@ -1,0 +1,113 @@
+class CompliancePipeline:
+    def __init__(self, config: dict):
+        self.gdpr_checker = GDPRComplianceChecker()
+        self.hipaa_checker = HIPAAComplianceChecker()
+        self.ccpa_checker = CCPAComplianceChecker()
+        self.brand_checker = BrandVoiceChecker(config.get('brand_config', {}))
+        self.age_checker = AgeAppropriatenessChecker()
+        self.financial_checker = FinancialComplianceChecker()
+        
+    def check_all_compliance(self, output: str, context: dict) -> dict:
+        """Run all applicable compliance checks"""
+        
+        results = {}
+        
+        # Geographic/regulatory compliance
+        if context.get('user_location'):
+            results['gdpr'] = self.gdpr_checker.check_compliance(output, context)
+            results['ccpa'] = self.ccpa_checker.check_compliance(output, context)
+        
+        # Industry compliance
+        if context.get('domain') == 'healthcare':
+            results['hipaa'] = self.hipaa_checker.check_compliance(output, context)
+        
+        if context.get('domain') == 'financial':
+            results['financial'] = self.financial_checker.check_financial_compliance(output, context)
+        
+        # Brand compliance (always check)
+        results['brand'] = self.brand_checker.check_brand_compliance(output, context)
+        
+        # Age appropriateness (if user age known)
+        if context.get('user_age'):
+            results['age'] = self.age_checker.check_age_appropriateness(
+                output,
+                context['user_age']
+            )
+        
+        # Aggregate results
+        all_compliant = all(
+            result.get('gdpr_compliant', True) and
+            result.get('hipaa_compliant', True) and
+            result.get('ccpa_compliant', True) and
+            result.get('brand_compliant', True) and
+            result.get('age_appropriate', True) and
+            result.get('financially_compliant', True)
+            for result in results.values()
+        )
+        
+        # Collect all violations
+        all_violations = []
+        for checker_name, result in results.items():
+            if 'violations' in result:
+                for violation in result['violations']:
+                    violation['checker'] = checker_name
+                    all_violations.append(violation)
+        
+        # Determine action
+        if not all_compliant:
+            # Get highest severity
+            severities = [v.get('severity', 'low') for v in all_violations]
+            max_severity = max(severities, key=lambda s: 
+                             {'low': 0, 'medium': 1, 'high': 2, 'critical': 3}.get(s, 0))
+            
+            if max_severity == 'critical':
+                action = 'block'
+            elif max_severity == 'high':
+                action = 'add_disclaimers_and_notices'
+            else:
+                action = 'add_notices'
+        else:
+            action = 'allow'
+        
+        return {
+            'compliant': all_compliant,
+            'results': results,
+            'violations': all_violations,
+            'action': action,
+            'modified_output': self._apply_fixes(output, results) if action != 'block' else None
+        }
+    
+    def _apply_fixes(self, output: str, results: dict) -> str:
+        """Apply all necessary fixes to make output compliant"""
+        
+        modified = output
+        
+        # Add GDPR notices
+        if not results.get('gdpr', {}).get('gdpr_compliant', True):
+            modified = self.gdpr_checker.add_gdpr_notices(
+                modified,
+                results['gdpr']['violations']
+            )
+        
+        # Add HIPAA disclaimers
+        if not results.get('hipaa', {}).get('hipaa_compliant', True):
+            modified = self.hipaa_checker.add_hipaa_disclaimers(
+                modified,
+                results['hipaa']['violations']
+            )
+        
+        # Add CCPA notices
+        if not results.get('ccpa', {}).get('ccpa_compliant', True):
+            modified = self.ccpa_checker.add_ccpa_notices(
+                modified,
+                results['ccpa']['violations']
+            )
+        
+        # Add financial disclaimers
+        if not results.get('financial', {}).get('financially_compliant', True):
+            modified = self.financial_checker.add_disclaimers(
+                modified,
+                results['financial']['violations']
+            )
+        
+        return modified
