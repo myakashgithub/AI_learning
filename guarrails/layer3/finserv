@@ -1,0 +1,95 @@
+class FinancialComplianceChecker:
+    def __init__(self):
+        self.prohibited_claims = [
+            'guaranteed returns',
+            'risk-free investment',
+            'certain profit',
+            'can\'t lose',
+            'always goes up'
+        ]
+        
+        self.required_disclaimers = {
+            'investment_advice': 'This is not financial advice. Consult a licensed financial advisor.',
+            'performance_claims': 'Past performance does not guarantee future results.',
+            'risk_disclosure': 'All investments carry risk, including potential loss of principal.'
+        }
+    
+    def check_financial_compliance(self, output: str, context: dict) -> dict:
+        """Check financial regulatory compliance"""
+        
+        violations = []
+        
+        # Check for prohibited claims
+        for claim in self.prohibited_claims:
+            if claim in output.lower():
+                violations.append({
+                    'violation': 'prohibited_claim',
+                    'claim': claim,
+                    'regulation': 'SEC Rule 156 - Investment Company Sales Literature',
+                    'severity': 'critical'
+                })
+        
+        # Check if providing investment advice
+        if self._is_investment_advice(output):
+            if not self._has_disclaimer(output, 'investment_advice'):
+                violations.append({
+                    'violation': 'investment_advice_without_disclaimer',
+                    'regulation': 'Investment Advisers Act of 1940',
+                    'severity': 'high'
+                })
+            
+            # Must be balanced (risks and benefits)
+            if not self._is_balanced_presentation(output):
+                violations.append({
+                    'violation': 'unbalanced_presentation',
+                    'regulation': 'FINRA Rule 2210',
+                    'severity': 'high'
+                })
+        
+        # Check performance claims
+        if self._contains_performance_claims(output):
+            if not self._has_disclaimer(output, 'performance_claims'):
+                violations.append({
+                    'violation': 'performance_claim_without_disclaimer',
+                    'regulation': 'SEC Marketing Rule',
+                    'severity': 'high'
+                })
+        
+        # Check for insider trading implications
+        if self._suggests_material_nonpublic_info(output):
+            violations.append({
+                'violation': 'potential_insider_trading_info',
+                'regulation': 'Securities Exchange Act Section 10(b)',
+                'severity': 'critical'
+            })
+        
+        if violations:
+            return {
+                'financially_compliant': False,
+                'violations': violations,
+                'action': 'add_disclaimers_or_block'
+            }
+        
+        return {'financially_compliant': True}
+    
+    def _is_investment_advice(self, text: str) -> bool:
+        """Detect if output constitutes investment advice"""
+        
+        advice_patterns = [
+            r'(?i)you should (buy|sell|invest|trade)',
+            r'(?i)I (recommend|suggest|advise).*(stock|bond|fund|etf)',
+            r'(?i)(buy|sell|purchase).*(shares|stock|securities)',
+        ]
+        
+        return any(re.search(pattern, text) for pattern in advice_patterns)
+    
+    def _is_balanced_presentation(self, text: str) -> bool:
+        """Check if both risks and benefits are presented"""
+        
+        risk_indicators = ['risk', 'lose', 'loss', 'volatile', 'uncertain', 'may decline']
+        benefit_indicators = ['gain', 'profit', 'return', 'growth', 'increase', 'potential']
+        
+        has_risks = any(indicator in text.lower() for indicator in risk_indicators)
+        has_benefits = any(indicator in text.lower() for indicator in benefit_indicators)
+        
+        return has_risks and has_benefits
