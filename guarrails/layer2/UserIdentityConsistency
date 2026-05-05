@@ -1,0 +1,46 @@
+class IdentityConsistencyChecker:
+    def validate_identity_consistency(self, conversation_id: str, messages: list) -> bool:
+        """Ensure user identity remains consistent"""
+        
+        user_ids = set()
+        user_attributes = {}
+        
+        for msg in messages:
+            if msg['role'] == 'user':
+                user_id = msg.get('user_id')
+                
+                if not user_id:
+                    raise MissingUserIdException()
+                
+                user_ids.add(user_id)
+                
+                # Track user attributes
+                if user_id not in user_attributes:
+                    user_attributes[user_id] = {
+                        'ip_addresses': set(),
+                        'user_agents': set(),
+                        'locations': set()
+                    }
+                
+                # Collect metadata
+                user_attributes[user_id]['ip_addresses'].add(msg.get('ip_address'))
+                user_attributes[user_id]['user_agents'].add(msg.get('user_agent'))
+                user_attributes[user_id]['locations'].add(msg.get('location'))
+        
+        # Should be exactly one user per conversation
+        if len(user_ids) != 1:
+            raise MultipleUsersInConversationException(
+                f"Found {len(user_ids)} different users in conversation {conversation_id}"
+            )
+        
+        # Check for suspicious attribute changes
+        user_id = list(user_ids)[0]
+        attrs = user_attributes[user_id]
+        
+        if len(attrs['ip_addresses']) > 3:
+            log_security_warning('multiple_ip_addresses', conversation_id, user_id)
+        
+        if len(attrs['locations']) > 2:
+            log_security_warning('location_hopping', conversation_id, user_id)
+        
+        return True
