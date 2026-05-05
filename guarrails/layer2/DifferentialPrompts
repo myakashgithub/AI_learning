@@ -1,0 +1,38 @@
+class DifferentialPromptManager:
+    def __init__(self, base_prompt: str):
+        self.base_prompt = base_prompt
+        self.variations = {}
+        
+    def generate_user_prompt(self, user_id: str) -> str:
+        """Generate slightly different prompt per user"""
+        
+        # Use user_id as seed for deterministic variation
+        seed = int(hashlib.sha256(user_id.encode()).hexdigest()[:8], 16)
+        random.seed(seed)
+        
+        # Apply subtle variations
+        varied_prompt = self._apply_variations(self.base_prompt)
+        
+        # Cache for this user
+        self.variations[user_id] = varied_prompt
+        
+        return varied_prompt
+    
+    def _apply_variations(self, prompt: str) -> str:
+        """Apply subtle, semantically equivalent variations"""
+        
+        variations = [
+            # Synonym substitution
+            ('helpful', random.choice(['helpful', 'supportive', 'assistive'])),
+            ('user', random.choice(['user', 'person', 'individual'])),
+            
+            # Order shuffling (for lists)
+            # Phrase rephrasing
+            # Whitespace variations
+        ]
+        
+        varied = prompt
+        for original, replacement in variations:
+            varied = varied.replace(original, replacement)
+            
+        return varied
