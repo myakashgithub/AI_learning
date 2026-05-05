@@ -1,0 +1,7 @@
+def classify_batch(texts: list[str]) -> list[dict]:
+    """Classify multiple outputs in single API call"""
+    
+    # Most toxicity APIs support batch processing
+    results = perspective_api.batch_analyze(texts)
+    
+    return results
