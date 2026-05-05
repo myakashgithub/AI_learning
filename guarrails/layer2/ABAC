@@ -1,0 +1,49 @@
+class ABACAuthorizationPolicy:
+    def evaluate_policy(
+        self,
+        user_attributes: dict,
+        resource_attributes: dict,
+        action: str,
+        environment: dict
+    ) -> bool:
+        """Evaluate complex authorization policy"""
+        
+        rules = [
+            # Rule 1: Financial transactions require verified account
+            {
+                'condition': lambda: action in ['payment', 'refund', 'transfer'],
+                'requirement': lambda: user_attributes.get('account_verified') == True
+            },
+            
+            # Rule 2: Database access only during business hours
+            {
+                'condition': lambda: action == 'database_query',
+                'requirement': lambda: self._is_business_hours(environment.get('timestamp'))
+            },
+            
+            # Rule 3: Sensitive data access requires 2FA
+            {
+                'condition': lambda: resource_attributes.get('sensitivity') == 'high',
+                'requirement': lambda: user_attributes.get('mfa_verified') == True
+            },
+            
+            # Rule 4: Geographic restrictions
+            {
+                'condition': lambda: action in ['payment', 'transfer'],
+                'requirement': lambda: user_attributes.get('country') not in ['blocked_country_1', 'blocked_country_2']
+            },
+            
+            # Rule 5: Transaction amount limits
+            {
+                'condition': lambda: action == 'payment',
+                'requirement': lambda: resource_attributes.get('amount', 0) <= user_attributes.get('daily_limit', 0)
+            }
+        ]
+        
+        # Evaluate all applicable rules
+        for rule in rules:
+            if rule['condition']():
+                if not rule['requirement']():
+                    return False
+        
+        return True
