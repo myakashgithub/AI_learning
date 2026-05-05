@@ -1,0 +1,40 @@
+class PromptVersionManager:
+    def __init__(self):
+        self.versions = {}
+        self.active_version = None
+        
+    def register_version(self, version_id: str, prompt: str, metadata: dict):
+        """Register a new prompt version"""
+        self.versions[version_id] = {
+            'prompt': prompt,
+            'hash': hashlib.sha256(prompt.encode()).hexdigest(),
+            'created_at': datetime.utcnow(),
+            'metadata': metadata,
+            'usage_count': 0,
+            'leak_attempts': 0
+        }
+    
+    def rotate_to_version(self, version_id: str):
+        """Switch to a different prompt version"""
+        if version_id not in self.versions:
+            raise VersionNotFoundException()
+            
+        self.active_version = version_id
+        
+        # Log rotation event
+        log_security_event({
+            'event': 'prompt_rotation',
+            'from_version': self.active_version,
+            'to_version': version_id,
+            'timestamp': datetime.utcnow()
+        })
+    
+    def get_active_prompt(self) -> str:
+        """Get the currently active prompt"""
+        if not self.active_version:
+            raise NoActiveVersionException()
+            
+        version_data = self.versions[self.active_version]
+        version_data['usage_count'] += 1
+        
+        return version_data['prompt']
