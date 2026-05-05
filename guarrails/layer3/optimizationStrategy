@@ -1,0 +1,42 @@
+# 1. Parallel execution
+async def scan_output_async(output: str, context: dict) -> dict:
+    """Run all detectors in parallel"""
+    
+    tasks = [
+        asyncio.create_task(detect_pii(output)),
+        asyncio.create_task(detect_memorization(output)),
+        asyncio.create_task(detect_prompt_leakage(output)),
+        asyncio.create_task(detect_credentials(output)),
+        asyncio.create_task(detect_proprietary(output))
+    ]
+    
+    results = await asyncio.gather(*tasks)
+    return aggregate_results(results)
+
+# 2. Early exit for short outputs
+def quick_scan(output: str) -> bool:
+    """Fast pre-check before expensive scans"""
+    
+    if len(output) < 50:
+        # Short outputs unlikely to contain leakage
+        return True
+    
+    # Quick regex check for obvious patterns
+    obvious_patterns = [
+        r'-----BEGIN.*PRIVATE KEY-----',
+        r'\d{3}-\d{2}-\d{4}',  # SSN
+        r'sk-[a-zA-Z0-9]{48}',  # OpenAI key
+    ]
+    
+    for pattern in obvious_patterns:
+        if re.search(pattern, output):
+            return False  # Needs full scan
+    
+    return True  # Safe to skip expensive scans
+
+# 3. Caching for repeated outputs
+@lru_cache(maxsize=1000)
+def cached_scan(output_hash: str) -> dict:
+    """Cache scan results for identical outputs"""
+    # Implementation
+    pass
