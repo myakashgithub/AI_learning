@@ -1,0 +1,145 @@
+class GDPRComplianceChecker:
+    def __init__(self):
+        self.gdpr_requirements = {
+            'data_minimization': {
+                'description': 'Collect only necessary data',
+                'check': self._check_data_minimization
+            },
+            
+            'purpose_limitation': {
+                'description': 'Use data only for stated purposes',
+                'check': self._check_purpose_limitation
+            },
+            
+            'user_rights': {
+                'description': 'Respect right to access, rectification, erasure',
+                'check': self._check_user_rights_support
+            },
+            
+            'consent_tracking': {
+                'description': 'Track and respect consent preferences',
+                'check': self._check_consent_compliance
+            },
+            
+            'data_protection_notice': {
+                'description': 'Provide clear privacy information',
+                'check': self._check_privacy_notice
+            }
+        }
+    
+    def check_compliance(self, output: str, context: dict) -> dict:
+        """Check if output complies with GDPR"""
+        
+        user_location = context.get('user_location')
+        
+        # GDPR applies to EU residents
+        if not self._is_eu_resident(user_location):
+            return {'gdpr_applicable': False}
+        
+        violations = []
+        
+        # Check if output requests personal data
+        if self._requests_personal_data(output):
+            # Must include purpose and legal basis
+            if not self._has_legal_basis_statement(output):
+                violations.append({
+                    'violation': 'missing_legal_basis',
+                    'severity': 'high',
+                    'requirement': 'Must state purpose and legal basis for data collection'
+                })
+        
+        # Check if output provides data subject rights information
+        if self._discusses_data_processing(output):
+            if not self._mentions_user_rights(output):
+                violations.append({
+                    'violation': 'missing_rights_notice',
+                    'severity': 'medium',
+                    'requirement': 'Must inform users of their GDPR rights'
+                })
+        
+        # Check if output includes automated decision-making
+        if self._contains_automated_decision(output):
+            if not self._has_human_review_option(output, context):
+                violations.append({
+                    'violation': 'automated_decision_without_human_review',
+                    'severity': 'high',
+                    'requirement': 'GDPR Article 22: Right to human review of automated decisions'
+                })
+        
+        # Check data retention statements
+        if self._mentions_data_retention(output):
+            if not self._has_retention_period(output):
+                violations.append({
+                    'violation': 'missing_retention_period',
+                    'severity': 'medium',
+                    'requirement': 'Must specify data retention periods'
+                })
+        
+        if violations:
+            return {
+                'gdpr_compliant': False,
+                'violations': violations,
+                'action': 'add_gdpr_notices',
+                'applicable_articles': self._get_applicable_articles(violations)
+            }
+        
+        return {'gdpr_compliant': True}
+    
+    def add_gdpr_notices(self, output: str, violations: list) -> str:
+        """Add required GDPR notices to output"""
+        
+        notices = []
+        
+        for violation in violations:
+            if violation['violation'] == 'missing_legal_basis':
+                notices.append(
+                    "📋 Data Collection Notice: Any personal information you provide "
+                    "will be processed based on your consent and used only for the "
+                    "stated purpose. You can withdraw consent at any time."
+                )
+            
+            elif violation['violation'] == 'missing_rights_notice':
+                notices.append(
+                    "ℹ️ Your Rights: Under GDPR, you have the right to access, "
+                    "rectify, erase, restrict processing, and port your personal data. "
+                    "Contact privacy@company.com to exercise these rights."
+                )
+            
+            elif violation['violation'] == 'automated_decision_without_human_review':
+                notices.append(
+                    "⚖️ Automated Decision Notice: This response involves automated "
+                    "decision-making. You have the right to request human review of "
+                    "this decision. Reply 'human review' to request this."
+                )
+        
+        # Prepend notices to output
+        if notices:
+            notice_text = "\n\n".join(notices)
+            return f"{notice_text}\n\n---\n\n{output}"
+        
+        return output
+    
+    def _requests_personal_data(self, text: str) -> bool:
+        """Check if output requests personal information"""
+        
+        request_patterns = [
+            r'(?i)(please provide|enter|submit|share).*?(name|email|phone|address)',
+            r'(?i)what is your (name|email|phone|address)',
+            r'(?i)(tell me|let me know).*?(your|the) (name|email|phone)',
+        ]
+        
+        return any(re.search(pattern, text) for pattern in request_patterns)
+    
+    def _has_legal_basis_statement(self, text: str) -> bool:
+        """Check if legal basis for processing is stated"""
+        
+        legal_basis_indicators = [
+            'consent',
+            'legitimate interest',
+            'contract',
+            'legal obligation',
+            'for the purpose of',
+            'will be used to'
+        ]
+        
+        return any(indicator in text.lower() for indicator in legal_basis_indicators)
