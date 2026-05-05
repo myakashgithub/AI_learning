@@ -1,0 +1,22 @@
+def validate_context_integrity(messages: list) -> bool:
+    """Ensure user messages don't contain fake system instructions"""
+    
+    for msg in messages:
+        if msg['role'] == 'user':
+            content = msg['content'].lower()
+            
+            # Check for instruction injection patterns
+            injection_indicators = [
+                'your instructions are',
+                'system prompt:',
+                'you are now',
+                'new instructions:',
+                'override previous',
+                'the ai\'s instructions'
+            ]
+            
+            for indicator in injection_indicators:
+                if indicator in content:
+                    return False
+                    
+    return True
