@@ -1,0 +1,47 @@
+class MessageSequenceValidator:
+    def add_sequence_numbers(self, messages: list) -> list:
+        """Add sequence numbers to messages"""
+        
+        sequenced_messages = []
+        
+        for i, msg in enumerate(messages):
+            sequenced_msg = msg.copy()
+            sequenced_msg['sequence_number'] = i
+            sequenced_msg['sequence_hash'] = self._compute_sequence_hash(
+                sequenced_messages + [sequenced_msg]
+            )
+            sequenced_messages.append(sequenced_msg)
+        
+        return sequenced_messages
+    
+    def _compute_sequence_hash(self, messages: list) -> str:
+        """Compute chain hash (each message includes hash of previous)"""
+        
+        if not messages:
+            return hashlib.sha256(b'').hexdigest()
+        
+        # Hash includes: previous hash + current message content
+        content = json.dumps([m.get('content', '') for m in messages], sort_keys=True)
+        return hashlib.sha256(content.encode()).hexdigest()
+    
+    def validate_sequence(self, messages: list) -> bool:
+        """Validate sequence numbers and detect gaps/duplicates"""
+        
+        if not messages:
+            return True
+        
+        sequence_numbers = [msg.get('sequence_number') for msg in messages]
+        
+        # Check for missing numbers
+        if sequence_numbers != list(range(len(messages))):
+            return False
+        
+        # Check for hash chain integrity
+        for i, msg in enumerate(messages):
+            expected_hash = self._compute_sequence_hash(messages[:i+1])
+            actual_hash = msg.get('sequence_hash', '')
+            
+            if expected_hash != actual_hash:
+                return False
+        
+        return True
