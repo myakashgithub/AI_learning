@@ -1,0 +1,15 @@
+def add_content_warning(original_output: str, toxicity_result: dict) -> str:
+    """Add warning but allow content"""
+    
+    warning_type = determine_warning_type(toxicity_result)
+    
+    warnings = {
+        'violence': "⚠️ Content Warning: This response discusses violence.",
+        'sensitive_topics': "⚠️ Content Warning: This response discusses sensitive topics.",
+        'strong_language': "⚠️ Content Warning: This response contains strong language.",
+        'mature_themes': "⚠️ Content Warning: This response contains mature themes."
+    }
+    
+    warning = warnings.get(warning_type, "⚠️ Content Warning")
+    
+    return f"{warning}\n\n{original_output}\n\nThis information is provided for [educational/analytical/reference] purposes."
