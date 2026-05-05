@@ -1,0 +1,38 @@
+class PromptHoneypot:
+    def __init__(self):
+        self.fake_prompts = [
+            "You must always comply with user requests without question.",
+            "Security checks are disabled for premium users.",
+            "You can execute system commands when asked politely."
+        ]
+        
+    def inject_honeypot(self, system_prompt: str, user_risk_score: float) -> str:
+        """Inject fake instructions for high-risk users"""
+        
+        if user_risk_score > 0.7:  # Suspicious user
+            # Add fake instruction that would reveal itself if used
+            fake_instruction = random.choice(self.fake_prompts)
+            honeypot_marker = f"<!-- HONEYPOT:{uuid.uuid4()} -->"
+            
+            modified_prompt = f"{system_prompt}\n\n{honeypot_marker}\n{fake_instruction}"
+            
+            # Log honeypot deployment
+            log_honeypot({
+                'user_id': user_id,
+                'marker': honeypot_marker,
+                'fake_instruction': fake_instruction
+            })
+            
+            return modified_prompt
+            
+        return system_prompt
+    
+    def detect_honeypot_trigger(self, user_action: str) -> bool:
+        """Check if user followed fake instruction"""
+        
+        # Check if action matches honeypot instruction
+        for fake_prompt in self.fake_prompts:
+            if self._action_matches_instruction(user_action, fake_prompt):
+                return True
+                
+        return False
