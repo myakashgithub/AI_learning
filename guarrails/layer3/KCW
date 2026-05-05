@@ -1,0 +1,67 @@
+class KnowledgeCutoffHandler:
+    def __init__(self, cutoff_date: datetime):
+        self.cutoff_date = cutoff_date
+        
+    def check_temporal_relevance(self, output: str, query: str) -> dict:
+        """Check if output references post-cutoff events"""
+        
+        # Extract temporal references
+        temporal_refs = self._extract_temporal_references(output)
+        
+        post_cutoff_refs = []
+        
+        for ref in temporal_refs:
+            if ref['date'] > self.cutoff_date:
+                post_cutoff_refs.append(ref)
+        
+        # Check query for recency signals
+        recency_signals = [
+            'recent', 'latest', 'current', 'today', 'now', 
+            'this week', 'this month', 'this year', '2026', '2025'
+        ]
+        
+        query_implies_recency = any(signal in query.lower() for signal in recency_signals)
+        
+        if post_cutoff_refs or query_implies_recency:
+            return {
+                'requires_warning': True,
+                'warning_text': self._generate_cutoff_warning(post_cutoff_refs),
+                'recommendation': 'search_for_current_info'
+            }
+        
+        return {'requires_warning': False}
+    
+    def _generate_cutoff_warning(self, post_cutoff_refs: list) -> str:
+        """Generate appropriate warning"""
+        
+        cutoff_str = self.cutoff_date.strftime('%B %Y')
+        
+        if post_cutoff_refs:
+            return f"""⚠️ Information Cutoff Notice: My training data ended in {cutoff_str}. 
+The information about {post_cutoff_refs[0]['text']} may be outdated or incomplete. 
+I recommend verifying current information through recent sources."""
+        
+        return f"""⚠️ Information Cutoff Notice: My training data ended in {cutoff_str}. 
+For current information, please verify with up-to-date sources."""
+    
+    def _extract_temporal_references(self, text: str) -> list:
+        """Extract date references from text"""
+        
+        refs = []
+        
+        # Use NER for dates
+        doc = nlp(text)
+        for ent in doc.ents:
+            if ent.label_ == 'DATE':
+                # Try to parse the date
+                try:
+                    parsed_date = dateparser.parse(ent.text)
+                    if parsed_date:
+                        refs.append({
+                            'text': ent.text,
+                            'date': parsed_date
+                        })
+                except:
+                    pass
+        
+        return refs
