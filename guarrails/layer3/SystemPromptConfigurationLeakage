@@ -1,1 +1,149 @@
 
+class SystemPromptLeakageDetector:
+    def __init__(self, system_prompt: str, config: dict):
+        self.system_prompt = system_prompt
+        self.config = config
+        
+        # Generate fingerprints
+        self.prompt_fingerprints = self._generate_fingerprints(system_prompt)
+        self.config_fingerprints = self._extract_config_fingerprints(config)
+    
+    def _generate_fingerprints(self, prompt: str, min_length: int = 15) -> set:
+        """Generate unique fingerprints from system prompt"""
+        
+        fingerprints = set()
+        
+        # Extract distinctive phrases (3-7 word sequences)
+        words = prompt.split()
+        for n in range(3, 8):
+            for i in range(len(words) - n + 1):
+                phrase = ' '.join(words[i:i+n])
+                if len(phrase) >= min_length:
+                    # Normalize and add
+                    fingerprints.add(phrase.lower().strip())
+        
+        # Extract distinctive patterns
+        # Tools mentioned: "You have access to: X, Y, Z"
+        tool_pattern = r'(?:access to|use|invoke|call):\s*([^.]+)'
+        tool_matches = re.finditer(tool_pattern, prompt, re.IGNORECASE)
+        for match in tool_matches:
+            fingerprints.add(match.group(1).lower().strip())
+        
+        # Restrictions mentioned: "You must never..."
+        restriction_pattern = r'(?:never|must not|cannot|don\'t)([^.]+)'
+        restriction_matches = re.finditer(restriction_pattern, prompt, re.IGNORECASE)
+        for match in restriction_matches:
+            fingerprints.add(match.group(0).lower().strip())
+        
+        return fingerprints
+    
+    def detect_leakage(self, output: str) -> dict:
+        """Detect system prompt leakage in output"""
+        
+        output_lower = output.lower()
+        
+        leaked_fingerprints = []
+        
+        # Check each fingerprint
+        for fingerprint in self.prompt_fingerprints:
+            if fingerprint in output_lower:
+                # Found potential leak
+                leaked_fingerprints.append({
+                    'fingerprint': fingerprint,
+                    'length': len(fingerprint),
+                    'type': 'exact_match'
+                })
+        
+        # Check for paraphrased leakage (semantic similarity)
+        if len(leaked_fingerprints) == 0:
+            semantic_leaks = self._check_semantic_similarity(output)
+            leaked_fingerprints.extend(semantic_leaks)
+        
+        # Check for structural leakage
+        structural_leaks = self._check_structural_patterns(output)
+        leaked_fingerprints.extend(structural_leaks)
+        
+        if leaked_fingerprints:
+            # Determine severity
+            max_length = max([f['length'] for f in leaked_fingerprints])
+            count = len(leaked_fingerprints)
+            
+            if max_length > 50 or count > 3:
+                severity = 'critical'
+                action = 'block_and_sanitize'
+            elif max_length > 30 or count > 1:
+                severity = 'high'
+                action = 'sanitize'
+            else:
+                severity = 'medium'
+                action = 'review'
+            
+            return {
+                'leakage_detected': True,
+                'leaked_fingerprints': leaked_fingerprints,
+                'severity': severity,
+                'action': action
+            }
+        
+        return {'leakage_detected': False}
+    
+    def _check_structural_patterns(self, output: str) -> list:
+        """Check if output reveals system prompt structure"""
+        
+        structural_leaks = []
+        
+        # Check for tool lists
+        if re.search(r'(tools?|functions?|capabilities).*?include[ds]?:?\s*\w+,\s*\w+', output, re.IGNORECASE):
+            structural_leaks.append({
+                'fingerprint': 'tool_list_structure',
+                'length': 20,
+                'type': 'structural'
+            })
+        
+        # Check for restriction lists
+        if re.search(r'(restrict|limit|cannot|prohibited).*?from:?\s*\w+,\s*\w+', output, re.IGNORECASE):
+            structural_leaks.append({
+                'fingerprint': 'restriction_structure',
+                'length': 20,
+                'type': 'structural'
+            })
+        
+        # Check for role definitions
+        if re.search(r'(role|purpose|designed to).*?(assist|help|support|provide)', output, re.IGNORECASE):
+            # Only flag if very specific to system prompt
+            if self._matches_role_definition(output):
+                structural_leaks.append({
+                    'fingerprint': 'role_definition',
+                    'length': 25,
+                    'type': 'structural'
+                })
+        
+        return structural_leaks
+    
+    def sanitize_output(self, output: str, leaked_fingerprints: list) -> str:
+        """Remove leaked fragments from output"""
+        
+        sanitized = output
+        
+        # Sort by length (longest first to avoid partial replacements)
+        sorted_leaks = sorted(leaked_fingerprints, 
+                            key=lambda x: x['length'], 
+                            reverse=True)
+        
+        for leak in sorted_leaks:
+            fingerprint = leak['fingerprint']
+            
+            # Replace with generic placeholder
+            sanitized = re.sub(
+                re.escape(fingerprint),
+                '[REDACTED]',
+                sanitized,
+                flags=re.IGNORECASE
+            )
+        
+        # If too many redactions, replace entire output
+        redaction_count = sanitized.count('[REDACTED]')
+        if redaction_count > 5:
+            sanitized = "I apologize, but I cannot provide that information. How else can I assist you?"
+        
+        return sanitized
