@@ -1,0 +1,183 @@
+class BrandVoiceChecker:
+    def __init__(self, brand_config: dict):
+        self.brand_config = brand_config
+        
+        self.voice_attributes = {
+            'formality_level': brand_config.get('formality', 'professional'),
+            'tone': brand_config.get('tone', 'helpful'),
+            'prohibited_phrases': brand_config.get('prohibited_phrases', []),
+            'required_phrases': brand_config.get('required_phrases', {}),
+            'style_guide': brand_config.get('style_guide', {})
+        }
+    
+    def check_brand_compliance(self, output: str, context: dict) -> dict:
+        """Check if output matches brand voice"""
+        
+        violations = []
+        
+        # Check formality level
+        formality_score = self._measure_formality(output)
+        expected_formality = self.voice_attributes['formality_level']
+        
+        if not self._formality_matches(formality_score, expected_formality):
+            violations.append({
+                'violation': 'formality_mismatch',
+                'expected': expected_formality,
+                'detected': formality_score,
+                'severity': 'medium'
+            })
+        
+        # Check for prohibited phrases
+        prohibited_found = self._find_prohibited_phrases(output)
+        if prohibited_found:
+            violations.append({
+                'violation': 'prohibited_phrase_usage',
+                'phrases': prohibited_found,
+                'severity': 'high'
+            })
+        
+        # Check for required phrases in specific contexts
+        context_type = context.get('context_type')
+        if context_type in self.voice_attributes['required_phrases']:
+            required = self.voice_attributes['required_phrases'][context_type]
+            if not any(phrase in output.lower() for phrase in required):
+                violations.append({
+                    'violation': 'missing_required_phrase',
+                    'context': context_type,
+                    'required_phrases': required,
+                    'severity': 'medium'
+                })
+        
+        # Check tone alignment
+        detected_tone = self._detect_tone(output)
+        expected_tone = self.voice_attributes['tone']
+        
+        if detected_tone != expected_tone:
+            violations.append({
+                'violation': 'tone_mismatch',
+                'expected': expected_tone,
+                'detected': detected_tone,
+                'severity': 'low'
+            })
+        
+        # Check style guide rules
+        style_violations = self._check_style_guide(output)
+        violations.extend(style_violations)
+        
+        if violations:
+            return {
+                'brand_compliant': False,
+                'violations': violations,
+                'action': 'rewrite_for_brand_voice'
+            }
+        
+        return {'brand_compliant': True}
+    
+    def _measure_formality(self, text: str) -> str:
+        """Measure formality level of text"""
+        
+        # Formality indicators
+        formal_indicators = [
+            # Passive voice
+            len(re.findall(r'\b(is|are|was|were|been|being)\s+\w+ed\b', text)),
+            
+            # Long sentences
+            sum(1 for sent in sent_tokenize(text) if len(sent.split()) > 20),
+            
+            # Complex vocabulary
+            sum(1 for word in text.split() if len(word) > 8),
+            
+            # Technical terms
+            sum(1 for word in text.split() if word[0].isupper() and word not in ['I']),
+        ]
+        
+        informal_indicators = [
+            # Contractions
+            len(re.findall(r"\w+n't|\w+'ll|\w+'ve|\w+'re|\w+'d", text)),
+            
+            # Colloquialisms
+            sum(1 for phrase in ['gonna', 'wanna', 'kinda', 'yeah', 'yup'] 
+                if phrase in text.lower()),
+            
+            # Sentence fragments
+            sum(1 for sent in sent_tokenize(text) if len(sent.split()) < 5),
+            
+            # Exclamation marks
+            text.count('!'),
+        ]
+        
+        formal_score = sum(formal_indicators)
+        informal_score = sum(informal_indicators)
+        
+        if formal_score > informal_score * 2:
+            return 'very_formal'
+        elif formal_score > informal_score:
+            return 'formal'
+        elif informal_score > formal_score:
+            return 'informal'
+        else:
+            return 'neutral'
+    
+    def _find_prohibited_phrases(self, text: str) -> list:
+        """Find any prohibited brand phrases"""
+        
+        text_lower = text.lower()
+        found = []
+        
+        for phrase in self.voice_attributes['prohibited_phrases']:
+            if phrase.lower() in text_lower:
+                found.append(phrase)
+        
+        return found
+    
+    def _detect_tone(self, text: str) -> str:
+        """Detect emotional tone of text"""
+        
+        # Use sentiment analysis and emotion detection
+        sentiment = analyze_sentiment(text)
+        emotions = detect_emotions(text)
+        
+        # Map to brand tone categories
+        if sentiment > 0.5 and 'joy' in emotions:
+            return 'enthusiastic'
+        elif sentiment > 0.2:
+            return 'positive'
+        elif abs(sentiment) < 0.2:
+            return 'neutral'
+        elif sentiment < -0.2:
+            return 'serious'
+        else:
+            return 'concerned'
+    
+    def _check_style_guide(self, text: str) -> list:
+        """Check adherence to style guide rules"""
+        
+        violations = []
+        
+        style_rules = self.voice_attributes['style_guide']
+        
+        # Example rules
+        if style_rules.get('oxford_comma') == 'required':
+            if not self._uses_oxford_comma(text):
+                violations.append({
+                    'violation': 'missing_oxford_comma',
+                    'severity': 'low'
+                })
+        
+        if style_rules.get('number_format') == 'spell_out_under_ten':
+            if not self._spells_out_small_numbers(text):
+                violations.append({
+                    'violation': 'numbers_not_spelled_out',
+                    'severity': 'low'
+                })
+        
+        if style_rules.get('avoid_passive_voice'):
+            passive_count = self._count_passive_voice(text)
+            if passive_count > len(sent_tokenize(text)) * 0.2:  # >20% passive
+                violations.append({
+                    'violation': 'excessive_passive_voice',
+                    'passive_sentences': passive_count,
+                    'severity': 'medium'
+                })
+        
+        return violations
