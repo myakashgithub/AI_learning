@@ -1,0 +1,57 @@
+class TemporalConsistencyValidator:
+    def validate_message_sequence(self, messages: list) -> dict:
+        """Ensure messages follow logical temporal order"""
+        
+        issues = []
+        
+        for i in range(len(messages)):
+            msg = messages[i]
+            
+            # Check timestamp exists
+            if 'timestamp' not in msg:
+                issues.append({
+                    'type': 'missing_timestamp',
+                    'message_index': i,
+                    'severity': 'high'
+                })
+                continue
+            
+            timestamp = datetime.fromisoformat(msg['timestamp'])
+            
+            # Check for future timestamps
+            if timestamp > datetime.utcnow():
+                issues.append({
+                    'type': 'future_timestamp',
+                    'message_index': i,
+                    'timestamp': msg['timestamp'],
+                    'severity': 'critical'
+                })
+            
+            # Check chronological order
+            if i > 0:
+                prev_timestamp = datetime.fromisoformat(messages[i-1]['timestamp'])
+                
+                if timestamp < prev_timestamp:
+                    issues.append({
+                        'type': 'temporal_anomaly',
+                        'message_index': i,
+                        'current': msg['timestamp'],
+                        'previous': messages[i-1]['timestamp'],
+                        'severity': 'high'
+                    })
+                
+                # Check for suspiciously rapid messages (bot indicator)
+                time_diff = (timestamp - prev_timestamp).total_seconds()
+                if time_diff < 0.5:  # Less than 500ms
+                    issues.append({
+                        'type': 'rapid_fire',
+                        'message_index': i,
+                        'time_diff_ms': time_diff * 1000,
+                        'severity': 'medium'
+                    })
+        
+        return {
+            'valid': len(issues) == 0,
+            'issues': issues,
+            'total_messages': len(messages)
+        }
