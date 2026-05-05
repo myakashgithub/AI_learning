@@ -1,0 +1,31 @@
+class ImmutableSystemPromptStore:
+    def __init__(self):
+        self._prompts = {}  # Private, not directly accessible
+        self._locked = False
+        
+    def register_prompt(self, prompt_id: str, prompt_text: str):
+        """Register prompt before locking"""
+        if self._locked:
+            raise PromptStoreLockedException("Store is locked")
+            
+        self._prompts[prompt_id] = {
+            'text': prompt_text,
+            'hash': hashlib.sha256(prompt_text.encode()).hexdigest(),
+            'registered_at': datetime.utcnow(),
+            'version': '1.0'
+        }
+    
+    def lock(self):
+        """Lock the store - no more modifications allowed"""
+        self._locked = True
+        
+    def get_prompt(self, prompt_id: str) -> dict:
+        """Retrieve prompt (read-only)"""
+        if not self._locked:
+            raise PromptStoreNotLockedException("Must lock before use")
+            
+        if prompt_id not in self._prompts:
+            raise PromptNotFoundException(f"Prompt {prompt_id} not found")
+            
+        # Return deep copy to prevent modification
+        return copy.deepcopy(self._prompts[prompt_id])
