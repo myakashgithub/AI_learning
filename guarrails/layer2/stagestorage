@@ -1,0 +1,47 @@
+class SecureConversationStore:
+    def __init__(self, database, state_manager):
+        self.db = database
+        self.state_manager = state_manager
+        
+    def save_conversation(self, conversation_id: str, messages: list):
+        """Save conversation with cryptographic signature"""
+        
+        # Generate signature
+        signed_state = self.state_manager.get_signed_state(conversation_id, messages)
+        
+        # Store in database
+        self.db.execute("""
+            INSERT INTO conversations (
+                id, messages, signature, updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                messages = excluded.messages,
+                signature = excluded.signature,
+                updated_at = excluded.updated_at
+        """, (
+            conversation_id,
+            json.dumps(messages),
+            signed_state['signature'],
+            datetime.utcnow()
+        ))
+        
+    def load_conversation(self, conversation_id: str) -> list:
+        """Load and verify conversation"""
+        
+        row = self.db.execute("""
+            SELECT messages, signature FROM conversations WHERE id = ?
+        """, (conversation_id,)).fetchone()
+        
+        if not row:
+            raise ConversationNotFoundException()
+            
+        messages = json.loads(row['messages'])
+        stored_signature = row['signature']
+        
+        # Verify integrity
+        if not self.state_manager.verify_state(conversation_id, messages, stored_signature):
+            raise ConversationTamperedException(
+                f"Conversation {conversation_id} signature mismatch"
+            )
+        
+        return messages
