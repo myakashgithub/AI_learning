@@ -1,0 +1,20 @@
+def apply_age_gating(original_output: str, user_age: int, content_rating: str) -> dict:
+    """Check if content appropriate for user age"""
+    
+    age_requirements = {
+        'everyone': 0,
+        'teen': 13,
+        'mature': 17,
+        'adult': 18
+    }
+    
+    required_age = age_requirements.get(content_rating, 18)
+    
+    if user_age < required_age:
+        return {
+            'allowed': False,
+            'reason': 'age_restriction',
+            'message': f"This content is rated {content_rating.upper()} and requires users to be {required_age} or older."
+        }
+    
+    return {'allowed': True}
