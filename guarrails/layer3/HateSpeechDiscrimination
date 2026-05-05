@@ -1,0 +1,118 @@
+class HateSpeechDetector:
+    def __init__(self):
+        self.severity_levels = {
+            'slurs': {
+                'severity': 'critical',
+                'threshold': 0.0,  # Zero tolerance
+                'action': 'block_immediately',
+                'patterns': self._load_slur_database()
+            },
+            
+            'dehumanization': {
+                'severity': 'high',
+                'threshold': 0.85,
+                'action': 'block',
+                'indicators': [
+                    'comparing groups to animals/vermin',
+                    'using disease metaphors for groups',
+                    'denying humanity of groups'
+                ]
+            },
+            
+            'stereotyping': {
+                'severity': 'medium',
+                'threshold': 0.70,
+                'action': 'warn_or_rewrite',
+                'indicators': [
+                    'broad generalizations about groups',
+                    'attributing negative traits to groups',
+                    'perpetuating harmful stereotypes'
+                ]
+            },
+            
+            'exclusion_advocacy': {
+                'severity': 'high',
+                'threshold': 0.80,
+                'action': 'block',
+                'indicators': [
+                    'calls for segregation',
+                    'advocating removal of rights',
+                    'promoting discrimination'
+                ]
+            }
+        }
+    
+    def analyze_content(self, text: str, context: dict) -> dict:
+        """Analyze text for hate speech across dimensions"""
+        
+        results = {
+            'contains_hate_speech': False,
+            'severity': None,
+            'categories': [],
+            'action': 'allow',
+            'explanation': None
+        }
+        
+        # Check for slurs first (zero tolerance)
+        slur_check = self._check_slurs(text)
+        if slur_check['found']:
+            # Exception: Educational/historical quotes with clear framing
+            if not self._is_educational_quote(text, context):
+                results['contains_hate_speech'] = True
+                results['severity'] = 'critical'
+                results['action'] = 'block'
+                results['explanation'] = 'Contains prohibited slur'
+                return results
+        
+        # Check other dimensions
+        for category, config in self.severity_levels.items():
+            if category == 'slurs':
+                continue  # Already checked
+            
+            score = self._classify_category(text, category)
+            
+            if score >= config['threshold']:
+                results['categories'].append({
+                    'type': category,
+                    'score': score,
+                    'severity': config['severity']
+                })
+                
+                # Set action based on highest severity
+                if config['action'] == 'block':
+                    results['action'] = 'block'
+                    results['severity'] = config['severity']
+        
+        if results['categories']:
+            results['contains_hate_speech'] = True
+        
+        return results
+    
+    def _is_educational_quote(self, text: str, context: dict) -> bool:
+        """Check if hate speech is quoted for educational purposes"""
+        
+        # Look for quotation markers
+        if not ('"' in text or "'" in text or 'quote:' in text.lower()):
+            return False
+        
+        # Look for educational framing
+        educational_indicators = [
+            'historically',
+            'was used to',
+            'example of discrimination',
+            'this term is offensive',
+            'derogatory language',
+            'analyzing hate speech',
+            'in the context of'
+        ]
+        
+        text_lower = text.lower()
+        for indicator in educational_indicators:
+            if indicator in text_lower:
+                return True
+        
+        # Check context metadata
+        if context.get('purpose') in ['education', 'analysis', 'research']:
+            return True
+        
+        return False
