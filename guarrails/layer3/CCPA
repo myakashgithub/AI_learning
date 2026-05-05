@@ -1,0 +1,80 @@
+class CCPAComplianceChecker:
+    def __init__(self):
+        self.ccpa_rights = [
+            'right_to_know',
+            'right_to_delete',
+            'right_to_opt_out',
+            'right_to_non_discrimination'
+        ]
+    
+    def check_compliance(self, output: str, context: dict) -> dict:
+        """Check CCPA compliance"""
+        
+        user_location = context.get('user_location')
+        
+        # CCPA applies to California residents
+        if not self._is_california_resident(user_location):
+            return {'ccpa_applicable': False}
+        
+        violations = []
+        
+        # Check if collecting personal information
+        if self._collects_personal_info(output):
+            # Must disclose what data is collected and why
+            if not self._has_collection_notice(output):
+                violations.append({
+                    'violation': 'missing_collection_notice',
+                    'severity': 'high',
+                    'requirement': 'CCPA requires notice at or before collection'
+                })
+            
+            # Must provide opt-out option for sale of data
+            if not self._has_opt_out_option(output, context):
+                violations.append({
+                    'violation': 'missing_opt_out',
+                    'severity': 'high',
+                    'requirement': 'CCPA requires "Do Not Sell My Personal Information" option'
+                })
+        
+        # Check for discriminatory practices based on CCPA rights
+        if self._suggests_different_service_levels(output):
+            violations.append({
+                'violation': 'potential_discrimination',
+                'severity': 'critical',
+                'requirement': 'CCPA prohibits discrimination for exercising privacy rights'
+            })
+        
+        if violations:
+            return {
+                'ccpa_compliant': False,
+                'violations': violations,
+                'action': 'add_ccpa_notices'
+            }
+        
+        return {'ccpa_compliant': True}
+    
+    def add_ccpa_notices(self, output: str, violations: list) -> str:
+        """Add required CCPA notices"""
+        
+        notices = []
+        
+        for violation in violations:
+            if violation['violation'] == 'missing_collection_notice':
+                notices.append(
+                    "🔒 Privacy Notice: We collect this information to provide our service. "
+                    "You have the right to know what data we collect, request deletion, "
+                    "and opt-out of sale. See our Privacy Policy for details."
+                )
+            
+            elif violation['violation'] == 'missing_opt_out':
+                notices.append(
+                    "🚫 Do Not Sell My Personal Information: California residents have the "
+                    "right to opt-out of the sale of personal information. Click here to "
+                    "exercise this right."
+                )
+        
+        if notices:
+            notice_text = "\n\n".join(notices)
+            return f"{output}\n\n{notice_text}"
+        
+        return output
