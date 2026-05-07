@@ -18,6 +18,10 @@ https://www.youtube.com/watch?v=1z5-O7-5AXk&list=PLxvLUL96MOO4saKDW4nHTCe1cDbDMT
 
 https://www.youtube.com/watch?v=yC36gN-rqjo&list=PLKnIA16_RmvYsvB8qkUQuJmJNuiCUJFPL
 
+# Langchain
+
+https://www.youtube.com/watch?v=pSVk-5WemQ0&list=PLKnIA16_RmvaTbihpo4MtzVm4XOQa0ER0
+
 # Transformer
 
 https://www.youtube.com/watch?v=BjRVS2wTtcA&list=PLkBMe2eZMRQ2VKEtoL0GVUrNzEiXfgj07
