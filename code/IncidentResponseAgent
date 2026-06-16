@@ -1,0 +1,531 @@
+"""
+10-Step AI Agent Framework — LangChain Implementation
+Based on: "How Do AI Agents Work" by Neo Kim & Fran Soto
+(newsletter.systemdesign.one/p/how-do-ai-agents-work)
+
+Each section maps 1-to-1 to a step in the framework.
+Run requirements:
+    pip install langchain langchain-openai langchain-community langgraph
+    export OPENAI_API_KEY=sk-...
+
+The example uses an Incident Response Agent as the running use case,
+exactly as the article does.
+"""
+
+import json
+import time
+import datetime
+from pathlib import Path
+from typing import Annotated, TypedDict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1 — Do the work manually
+# Capture the manual runbook as plain Python functions. This is your baseline.
+# The agent will eventually replace every one of these calls.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def manual_check_dashboard() -> dict:
+    """Simulate opening a monitoring dashboard and reading metrics."""
+    print("[Step 1] Checking dashboard manually...")
+    return {
+        "alarm": "HighErrorRate",
+        "service": "payment-service",
+        "value": "12.4%",
+        "threshold": "5%",
+        "fired_at": "2025-06-05T03:14:00Z",
+    }
+
+def manual_check_runbook(alarm_name: str) -> str:
+    """Simulate reading a runbook for a given alarm."""
+    print(f"[Step 1] Reading runbook for '{alarm_name}'...")
+    return (
+        "1. Check DB connection pool utilisation.\n"
+        "2. Inspect HTTP 500 logs from the last 15 minutes.\n"
+        "3. Verify downstream dependency health."
+    )
+
+def manual_query_logs(service: str, minutes: int = 15) -> list[dict]:
+    """Simulate querying the log store."""
+    print(f"[Step 1] Querying logs for '{service}' (last {minutes} min)...")
+    return [
+        {
+            "timestamp": "2025-06-05T03:12:31Z",
+            "level": "ERROR",
+            "message": "Connection timeout to postgres://db-primary:5432",
+            "trace": "at PaymentService.charge() line 87",
+        },
+        {
+            "timestamp": "2025-06-05T03:13:05Z",
+            "level": "ERROR",
+            "message": "Circuit breaker OPEN for db-primary",
+            "trace": "at CircuitBreaker.execute() line 42",
+        },
+    ]
+
+# Uncomment to see Step 1 in action:
+# alarm  = manual_check_dashboard()
+# book   = manual_check_runbook(alarm["alarm"])
+# logs   = manual_query_logs(alarm["service"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2 — Start using an LLM
+# Replace manual analysis with an LLM call. Human still moves data around.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+def llm_analyse_logs(logs: list[dict]) -> str:
+    """
+    Step 2: paste data to the LLM; get analysis back.
+    Human still fetches logs manually and copy-pastes them here.
+    """
+    logs_text = json.dumps(logs, indent=2)
+    messages = [
+        SystemMessage(content=(
+            "You are an expert SRE. Analyse the provided logs and identify "
+            "the root cause concisely."
+        )),
+        HumanMessage(content=f"Review these logs and tell me what is failing:\n{logs_text}"),
+    ]
+    response = llm.invoke(messages)
+    return response.content
+
+# Uncomment to see Step 2:
+# logs     = manual_query_logs("payment-service")
+# analysis = llm_analyse_logs(logs)
+# print(analysis)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3 — Add MCP / Tool wrappers
+# The LLM can now fetch data itself — no more copy-paste.
+# In LangChain these are @tool-decorated functions, equivalent to MCP tools.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from langchain_core.tools import tool
+
+@tool
+def get_recent_alarms(minutes: int = 15) -> str:
+    """
+    Fetch alarms that fired in the last N minutes from the monitoring system.
+    Returns a JSON string with alarm name, service, metric value, and timestamp.
+    """
+    # In production: call PagerDuty / CloudWatch / Datadog API here.
+    alarm = {
+        "alarm": "HighErrorRate",
+        "service": "payment-service",
+        "value": "12.4%",
+        "threshold": "5%",
+        "fired_at": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    return json.dumps(alarm)
+
+@tool
+def query_error_logs(service: str, minutes: int = 15) -> str:
+    """
+    Query the log store for HTTP 500 errors from a given service.
+    Returns a JSON array with timestamp, message, and stack trace.
+    """
+    # In production: call Elasticsearch / CloudWatch Logs / Splunk here.
+    logs = [
+        {
+            "timestamp": "2025-06-05T03:12:31Z",
+            "level": "ERROR",
+            "message": "Connection timeout to postgres://db-primary:5432",
+            "trace": "at PaymentService.charge() line 87",
+        },
+        {
+            "timestamp": "2025-06-05T03:13:05Z",
+            "level": "ERROR",
+            "message": "Circuit breaker OPEN for db-primary",
+            "trace": "at CircuitBreaker.execute() line 42",
+        },
+    ]
+    return json.dumps(logs)
+
+@tool
+def get_runbook(alarm_name: str) -> str:
+    """
+    Retrieve the runbook markdown for a named alarm.
+    Returns step-by-step troubleshooting instructions.
+    """
+    # In production: fetch from Confluence / Notion / S3.
+    runbooks = {
+        "HighErrorRate": (
+            "# HighErrorRate Runbook\n"
+            "1. Check DB connection pool utilisation.\n"
+            "2. Inspect HTTP 500 logs from the last 15 minutes.\n"
+            "3. Verify downstream dependency health endpoints.\n"
+            "4. If DB circuit breaker is OPEN, attempt manual reset after 60 s."
+        )
+    }
+    return runbooks.get(alarm_name, f"No runbook found for '{alarm_name}'.")
+
+mcp_tools = [get_recent_alarms, query_error_logs, get_runbook]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4 — Add Agent Skills
+# Skills are reusable prompt snippets loaded into the system prompt on demand.
+# They teach the agent HOW to do work — reducing hallucinations.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKILLS = {
+    "metrics_and_alarms": """
+## Skill: Metrics & Alarm Management
+- Always call get_recent_alarms before any other tool.
+- Report alarm name, service, and current value vs threshold.
+- If multiple alarms fired, prioritise by severity: ERROR > WARN > INFO.
+""",
+    "log_analysis": """
+## Skill: Log Analysis
+- Call query_error_logs with the service name from the alarm.
+- Extract: error message, stack trace, and first occurrence timestamp.
+- Identify whether errors are isolated or cascading across services.
+- Correlate log timestamps with alarm fired_at to confirm causation.
+""",
+    "incident_reporting": """
+## Skill: Incident Reporting
+- Structure your root cause analysis (RCA) with:
+  1. Incident summary (one sentence)
+  2. Root cause (technical, specific)
+  3. Impact (services affected, error rate)
+  4. Recommended next step (single most important action)
+- Keep the report under 200 words.
+""",
+}
+
+def build_system_prompt(active_skills: list[str]) -> str:
+    """
+    Step 4: Load only the skills needed for this task.
+    Unused skills stay out of the context window — saves tokens.
+    """
+    base = (
+        "You are an expert SRE incident response agent. "
+        "Use the provided tools to investigate incidents. "
+        "Never guess data — always fetch it with a tool first.\n\n"
+    )
+    skill_text = "\n".join(
+        SKILLS[s] for s in active_skills if s in SKILLS
+    )
+    return base + skill_text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 5 — Add Memory
+# Short-term: LangGraph message history (in-thread).
+# Long-term: agents.md file on disk — read at startup, updated after incidents.
+# ─────────────────────────────────────────────────────────────────────────────
+
+AGENTS_MD_PATH = Path("agents.md")
+
+def load_long_term_memory() -> str:
+    """Read agents.md — the agent's long-term incident history."""
+    if AGENTS_MD_PATH.exists():
+        return AGENTS_MD_PATH.read_text()
+    return "# Incident History\nNo past incidents recorded yet.\n"
+
+def save_to_long_term_memory(rca_summary: str) -> None:
+    """Append a resolved incident RCA to agents.md."""
+    timestamp = datetime.datetime.utcnow().isoformat()
+    entry = f"\n## {timestamp}\n{rca_summary}\n"
+    with open(AGENTS_MD_PATH, "a") as f:
+        f.write(entry)
+    print(f"[Memory] Incident appended to {AGENTS_MD_PATH}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 6 — Orchestrate with Agent SOPs
+# The SOP is a structured prompt that drives the agent through all steps
+# in order — no human step-by-step prompting required.
+# Written in RFC 2119 style (MUST / SHOULD / MAY).
+# ─────────────────────────────────────────────────────────────────────────────
+
+INCIDENT_RESPONSE_SOP = """
+# SOP: Incident Response Investigation
+
+## Trigger
+Execute this SOP when an incident ticket ID is provided.
+
+## Procedure (MUST follow in order)
+
+1. MUST call get_recent_alarms to identify what fired and which service is affected.
+2. MUST call get_runbook with the alarm name to load troubleshooting guidance.
+3. MUST call query_error_logs for the affected service to collect error evidence.
+4. MUST correlate alarm timing with log timestamps to confirm causation.
+5. MUST produce a structured RCA report using the Incident Reporting skill.
+6. SHOULD note any patterns matching past incidents from the Incident History section.
+7. MAY recommend additional diagnostic commands if the root cause is unclear.
+
+## Output format
+Return ONLY the RCA report. No tool output, no intermediate reasoning.
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 7 — Define the Agent
+# Bundle all dependencies into one place: LLM + tools + skills + SOP + memory.
+# This is the "agent definition" — the equivalent of a package manifest.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+def build_incident_response_agent() -> AgentExecutor:
+    """
+    Step 7: Declare and wire all agent components in one factory function.
+    Change the LLM, tools, or skills here — nothing else needs to change.
+    """
+    long_term_memory = load_long_term_memory()
+
+    system_prompt = (
+        build_system_prompt(
+            ["metrics_and_alarms", "log_analysis", "incident_reporting"]
+        )
+        + "\n\n# Incident History (long-term memory)\n"
+        + long_term_memory
+        + "\n\n# Standard Operating Procedure\n"
+        + INCIDENT_RESPONSE_SOP
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder("chat_history", optional=True),
+        ("human", "{input}"),
+        MessagesPlaceholder("agent_scratchpad"),
+    ])
+
+    agent = create_tool_calling_agent(
+        llm=llm,
+        tools=mcp_tools,
+        prompt=prompt,
+    )
+
+    return AgentExecutor(
+        agent=agent,
+        tools=mcp_tools,
+        verbose=True,          # show tool calls — useful while watching the agent
+        max_iterations=8,
+        handle_parsing_errors=True,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 8 — Execute the Agent Periodically
+# A simple poll loop: check for new alerts, run the agent, sleep, repeat.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def poll_and_respond(interval_seconds: int = 60, max_cycles: int = 3) -> None:
+    """
+    Step 8: Run the agent autonomously on a polling loop.
+    In production: replace the stub with a real alerting API call.
+    Set max_cycles=None for an infinite loop.
+    """
+    agent_executor = build_incident_response_agent()
+    cycle = 0
+
+    while max_cycles is None or cycle < max_cycles:
+        cycle += 1
+        print(f"\n[Poll loop] Cycle {cycle} — checking for alerts...")
+
+        # Stub: in production, call PagerDuty/CloudWatch/Alertmanager here.
+        new_alert = True  # simulate alert found
+
+        if new_alert:
+            print("[Poll loop] Alert detected — invoking agent...")
+            result = agent_executor.invoke({
+                "input": "Investigate the incident. Follow the SOP."
+            })
+            rca = result["output"]
+            print(f"\n[RCA]\n{rca}\n")
+            save_to_long_term_memory(rca)
+        else:
+            print("[Poll loop] No alerts — sleeping.")
+
+        if max_cycles is None or cycle < max_cycles:
+            print(f"[Poll loop] Sleeping {interval_seconds}s...")
+            time.sleep(interval_seconds)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 9 — Improve State Management
+# Wire the agent to production event sources: webhooks + cron.
+# The FastAPI webhook handler below replaces the simple poll loop.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Install: pip install fastapi uvicorn
+# Run:     uvicorn agent_framework_langchain:app --port 8080
+
+try:
+    from fastapi import FastAPI, BackgroundTasks
+    from pydantic import BaseModel
+
+    app = FastAPI(title="Incident Response Agent")
+
+    class AlertPayload(BaseModel):
+        ticket_id: str
+        alarm_name: str
+        service: str
+
+    @app.post("/webhook/alert")
+    async def handle_alert(payload: AlertPayload, background: BackgroundTasks):
+        """
+        Step 9 (webhook): PagerDuty / Alertmanager posts here on a new incident.
+        Agent runs in the background; result is saved to agents.md and posted
+        to Slack (stub — add your Slack SDK call inside run_agent).
+        """
+        background.add_task(run_agent_for_ticket, payload.ticket_id)
+        return {"status": "accepted", "ticket": payload.ticket_id}
+
+    def run_agent_for_ticket(ticket_id: str) -> None:
+        agent_executor = build_incident_response_agent()
+        result = agent_executor.invoke({
+            "input": f"Investigate incident ticket {ticket_id}. Follow the SOP."
+        })
+        rca = result["output"]
+        save_to_long_term_memory(rca)
+        # TODO: post rca to Slack with slack_sdk.WebClient().chat_postMessage(...)
+        print(f"[Webhook] RCA for {ticket_id}:\n{rca}")
+
+except ImportError:
+    app = None  # FastAPI not installed — skip webhook registration
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 10 — Scale to Multiple Agents
+# Orchestrator receives the trigger and fans out to specialist subagents.
+# Subagents share results via the filesystem (agents.md) — no message bus needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Specialist subagents ──────────────────────────────────────────────────────
+
+def build_log_analyst_agent() -> AgentExecutor:
+    """Subagent: focused only on log analysis."""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", (
+            "You are a log analysis specialist. "
+            "Your ONLY job: call query_error_logs, extract the root error, "
+            "and return a single-paragraph technical summary. No fluff."
+            + build_system_prompt(["log_analysis"])
+        )),
+        ("human", "{input}"),
+        MessagesPlaceholder("agent_scratchpad"),
+    ])
+    agent = create_tool_calling_agent(llm=llm, tools=[query_error_logs], prompt=prompt)
+    return AgentExecutor(agent=agent, tools=[query_error_logs], verbose=False, max_iterations=4)
+
+def build_infra_check_agent() -> AgentExecutor:
+    """Subagent: focused only on alarm triage + runbook lookup."""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", (
+            "You are an infrastructure triage specialist. "
+            "Call get_recent_alarms and get_runbook, then return a one-paragraph "
+            "summary of what fired and what the runbook says to do."
+            + build_system_prompt(["metrics_and_alarms"])
+        )),
+        ("human", "{input}"),
+        MessagesPlaceholder("agent_scratchpad"),
+    ])
+    agent = create_tool_calling_agent(
+        llm=llm, tools=[get_recent_alarms, get_runbook], prompt=prompt
+    )
+    return AgentExecutor(
+        agent=agent, tools=[get_recent_alarms, get_runbook], verbose=False, max_iterations=4
+    )
+
+# ── Filesystem message bus ────────────────────────────────────────────────────
+
+WORKSPACE = Path("workspace")
+WORKSPACE.mkdir(exist_ok=True)
+
+def write_subagent_output(agent_name: str, content: str) -> None:
+    path = WORKSPACE / f"{agent_name}_output.md"
+    path.write_text(content)
+    print(f"[Filesystem] {agent_name} wrote output to {path}")
+
+def read_all_subagent_outputs() -> str:
+    outputs = []
+    for f in sorted(WORKSPACE.glob("*_output.md")):
+        outputs.append(f"### {f.stem}\n{f.read_text()}")
+    return "\n\n".join(outputs)
+
+# ── Orchestrator ──────────────────────────────────────────────────────────────
+
+def orchestrator(ticket_id: str) -> str:
+    """
+    Step 10: Orchestrator fans out to specialist subagents, collects their
+    filesystem outputs, then synthesises a final RCA.
+    """
+    print(f"\n[Orchestrator] Starting multi-agent investigation for {ticket_id}")
+
+    # 1. Run infra triage subagent
+    infra_agent = build_infra_check_agent()
+    infra_result = infra_agent.invoke({"input": f"Triage the incident for ticket {ticket_id}."})
+    write_subagent_output("infra_check", infra_result["output"])
+
+    # 2. Run log analyst subagent
+    log_agent = build_log_analyst_agent()
+    log_result = log_agent.invoke({"input": f"Analyse error logs for ticket {ticket_id}."})
+    write_subagent_output("log_analyst", log_result["output"])
+
+    # 3. Orchestrator reads all outputs and synthesises the final RCA
+    combined = read_all_subagent_outputs()
+    long_term = load_long_term_memory()
+
+    synthesis_prompt = [
+        SystemMessage(content=(
+            "You are an incident response orchestrator. "
+            "You have received reports from specialist subagents. "
+            "Synthesise them into a single structured RCA following this format:\n"
+            "1. Incident summary\n2. Root cause\n3. Impact\n4. Recommended action\n\n"
+            f"# Past incidents (long-term memory)\n{long_term}"
+        )),
+        HumanMessage(content=f"Subagent reports:\n\n{combined}"),
+    ]
+    final_rca = llm.invoke(synthesis_prompt).content
+    save_to_long_term_memory(final_rca)
+
+    print(f"\n[Orchestrator] Final RCA:\n{final_rca}")
+    return final_rca
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTRY POINT
+# Uncomment the section matching the step you want to run.
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+
+    # ── Step 1: pure manual ──────────────────────────────────────────────────
+    # alarm = manual_check_dashboard()
+    # book  = manual_check_runbook(alarm["alarm"])
+    # logs  = manual_query_logs(alarm["service"])
+    # print(json.dumps(logs, indent=2))
+
+    # ── Step 2: LLM analysis (human fetches data) ───────────────────────────
+    # logs     = manual_query_logs("payment-service")
+    # analysis = llm_analyse_logs(logs)
+    # print(analysis)
+
+    # ── Steps 3-7: single-agent with tools + skills + SOP + memory ──────────
+    agent = build_incident_response_agent()
+    result = agent.invoke({
+        "input": "Investigate the current incident. Follow the SOP."
+    })
+    print("\n── Final RCA ──")
+    print(result["output"])
+    save_to_long_term_memory(result["output"])
+
+    # ── Step 8: autonomous poll loop (3 cycles for demo) ────────────────────
+    # poll_and_respond(interval_seconds=5, max_cycles=3)
+
+    # ── Step 9: start webhook server ────────────────────────────────────────
+    # import uvicorn
+    # uvicorn.run(app, host="0.0.0.0", port=8080)
+
+    # ── Step 10: multi-agent orchestrator ───────────────────────────────────
+    # orchestrator("JIRA-1234")
